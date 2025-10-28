@@ -1,6 +1,7 @@
 Flask
-flask_sqlalchemy 
-cryptography 
-bcrypt 
+flask_sqlalchemy
+cryptography
+bcrypt
 pyjwt
 flasgger
+python-dotenv
