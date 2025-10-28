@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request
 import logging
+from datetime import datetime
 from flasgger import Swagger
 from utils import (
     hash_password,
@@ -9,14 +10,22 @@ from utils import (
     generate_salt,
     derive_key_from_password,
     encrypt_aes_gcm,
-    decrypt_aes_gcm
+    decrypt_aes_gcm,
+    generate_hmac, 
+    verify_hmac
 )
 from data_access import (
     init_database,
     create_user,
     get_user_password_hash,
     get_user_encryption_key,
-    user_exists
+    user_exists,
+    get_user_hmac_key,
+    get_message_by_id,
+    get_user_messages,
+    mark_message_as_read,
+    store_message,
+    reset_database
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -321,35 +330,460 @@ def decrypt():
     return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-@app.route("/hmac", methods=["POST"])
+
+@app.route('/messages', methods=['POST'])
+def send_message():
+    """
+    Envía un mensaje cifrado a otro usuario.
+    
+    Headers:
+        Authorization: Bearer <token_jwt>
+    
+    Body JSON:
+        {
+            "to": "username_destinatario",
+            "message": "texto del mensaje"
+        }
+    
+    Proceso:
+        1. Verifica el token JWT del remitente
+        2. Verifica que el destinatario existe
+        3. Cifra el mensaje con AES-256-GCM usando la clave del REMITENTE
+        4. Almacena el mensaje cifrado en la BD
+        5. Genera un HMAC del mensaje para integridad adicional
+    
+    Respuesta exitosa (201):
+        {
+            "success": true,
+            "message_id": 123,
+            "from": "username_remitente",
+            "to": "username_destinatario",
+            "timestamp": "2025-10-28T10:30:00",
+            "encryption_info": {
+                "algorithm": "AES-256-GCM",
+                "key_size": 256,
+                "authenticated": true
+            }
+        }
+    
+    Errores:
+        - 400: Datos faltantes o inválidos
+        - 401: Token inválido o ausente
+        - 404: Usuario destinatario no encontrado
+        - 500: Error interno del servidor
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+        
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username_from = payload['username']
+        
+        # Obtener datos del request
+        data = request.get_json()
+        username_to = data.get('to')
+        message_text = data.get('message')
+        
+        # Validar datos de entrada
+        if not username_to or not message_text:
+            return jsonify({'error': 'Destinatario y mensaje requeridos'}), 400
+        
+        if not user_exists(username_to):
+            return jsonify({'error': 'Usuario destinatario no encontrado'}), 404
+        
+        # Obtener clave de cifrado del remitente
+        encryption_key = get_user_encryption_key(username_from)
+        
+        # Cifrar mensaje con AES-256-GCM (incluye autenticación)
+        encrypted_data = encrypt_aes_gcm(message_text, encryption_key)
+        
+        # Generar HMAC adicional para demostrar conocimiento
+        # (aunque GCM ya autentica, esto es para mostrar HMAC explícitamente)
+        hmac_key = get_user_hmac_key(username_from)
+        message_hmac = generate_hmac(message_text, hmac_key)
+        
+        # Guardar mensaje en BD
+        timestamp = datetime.now().isoformat()
+        message_id = store_message(
+            username_from=username_from,
+            username_to=username_to,
+            ciphertext=encrypted_data['ciphertext'],
+            nonce=encrypted_data['nonce'],
+            tag=encrypted_data['tag'],
+            hmac=message_hmac,
+            timestamp=timestamp
+        )
+        
+        timestamp = datetime.now().isoformat()
+        
+        logger.info(
+            f"Mensaje enviado: {username_from} -> {username_to} "
+            f"(ID: {message_id}, Algoritmo: AES-256-GCM, "
+            f"Tag autenticación: {encrypted_data['tag'][:16]}...)"
+        )
+        
+        return jsonify({
+            'success': True,
+            'message_id': message_id,
+            'from': username_from,
+            'to': username_to,
+            'timestamp': timestamp,
+            'encryption_info': {
+                'algorithm': 'AES-256-GCM',
+                'key_size': 256,
+                'authenticated': True,
+                'hmac_algorithm': 'HMAC-SHA256'
+            }
+        }), 201
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        logger.error(f"Error al enviar mensaje: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+
+@app.route('/messages', methods=['GET'])
+def get_messages():
+    """
+    Obtiene los mensajes recibidos por el usuario autenticado.
+    
+    Headers:
+        Authorization: Bearer <token_jwt>
+    
+    Query params (opcional):
+        - unread_only: "true" para solo mensajes no leídos
+    
+    Proceso:
+        1. Verifica el token JWT
+        2. Obtiene mensajes cifrados de la BD
+        3. NO los descifra automáticamente (privacidad)
+        4. Devuelve lista con metadata
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "messages": [
+                {
+                    "message_id": 123,
+                    "from": "username_remitente",
+                    "timestamp": "2025-10-28T10:30:00",
+                    "read": false
+                },
+                ...
+            ]
+        }
+    
+    Errores:
+        - 401: Token inválido o ausente
+        - 500: Error interno del servidor
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+        
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username = payload['username']
+        
+        # Obtener parámetros opcionales
+        unread_only = request.args.get('unread_only', 'false').lower() == 'true'
+        
+        # Obtener mensajes de la BD (sin descifrar)
+        messages = get_user_messages(username, unread_only)
+        
+        logger.info(f"Usuario '{username}' consultó sus mensajes ({len(messages)} encontrados)")
+        
+        return jsonify({
+            'success': True,
+            'messages': messages
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        logger.error(f"Error al obtener mensajes: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+
+@app.route('/messages/<int:message_id>', methods=['GET'])
+def read_message(message_id):
+    """
+    Lee y descifra un mensaje específico.
+    
+    Headers:
+        Authorization: Bearer <token_jwt>
+    
+    Proceso:
+        1. Verifica el token JWT
+        2. Verifica que el mensaje pertenece al usuario
+        3. Obtiene el mensaje cifrado de la BD
+        4. Para descifrarlo, necesita la clave del REMITENTE
+           (simplificación: usamos clave del destinatario)
+        5. Verifica HMAC y tag GCM
+        6. Descifra el mensaje
+        7. Marca como leído
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "message_id": 123,
+            "from": "username_remitente",
+            "to": "username_destinatario",
+            "message": "texto descifrado",
+            "timestamp": "2025-10-28T10:30:00",
+            "verification": {
+                "gcm_tag_valid": true,
+                "hmac_valid": true
+            }
+        }
+    
+    Errores:
+        - 401: Token inválido o ausente
+        - 403: Mensaje no pertenece al usuario
+        - 404: Mensaje no encontrado
+        - 400: Verificación de integridad falló
+        - 500: Error interno del servidor
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+        
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username = payload['username']
+        
+        # Obtener mensaje de la BD
+        message_data = get_message_by_id(message_id)
+        
+        if not message_data:
+            return jsonify({'error': 'Mensaje no encontrado'}), 404
+        
+        # Verificar que el mensaje es para este usuario
+        logger.info(f"Usuario '{username}' intentando leer mensaje ID {message_id}")
+        logger.info(f"Mensaje pertenece a: '{message_data['username_to']}'")
+        if message_data['username_to'] != username:
+            logger.warning(
+                f"Usuario '{username}' intentó leer mensaje de '{message_data['username_to']}'"
+            )
+            return jsonify({'error': 'No autorizado para leer este mensaje'}), 403
+        logger.info(f"Acceso autorizado para '{username}' leer mensaje ID {message_id}")
+        
+        # Obtener clave del remitente para descifrar
+        encryption_key = get_user_encryption_key(message_data['username_from'])
+
+        if not encryption_key:
+            return jsonify({'error': 'Usuario remitente no encontrado'}), 404
+        
+        # Descifrar con AES-256-GCM (verifica tag automáticamente)
+        try:
+            plaintext = decrypt_aes_gcm(
+                message_data['ciphertext'],
+                message_data['nonce'],
+                message_data['tag'],
+                encryption_key
+            )
+            gcm_valid = True
+        except ValueError:
+            logger.error(f"Tag GCM inválido para mensaje {message_id}")
+            return jsonify({'error': 'Mensaje corrupto o manipulado (GCM tag inválido)'}), 400
+        
+        # Verificar HMAC adicional
+        hmac_key = get_user_hmac_key(message_data['username_from'])
+        hmac_valid = verify_hmac(plaintext, message_data['hmac'], hmac_key)
+        
+        if not hmac_valid:
+            logger.warning(f"HMAC inválido para mensaje {message_id}")
+            return jsonify({'error': 'Mensaje corrupto o manipulado (HMAC inválido)'}), 400
+        
+        # Marcar como leído
+        mark_message_as_read(message_id)
+        
+        logger.info(
+            f"Mensaje {message_id} leído por '{username}' "
+            f"(GCM válido: {gcm_valid}, HMAC válido: {hmac_valid})"
+        )
+        
+        return jsonify({
+            'success': True,
+            'message_id': message_id,
+            'from': message_data['username_from'],
+            'to': message_data['username_to'],
+            'message': plaintext,
+            'timestamp': message_data['timestamp'],
+            'verification': {
+                'gcm_tag_valid': gcm_valid,
+                'hmac_valid': hmac_valid
+            }
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        logger.error(f"Error al leer mensaje: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+
+@app.route('/hmac/generate', methods=['POST'])
 def hmac_generate():
-  """
-  Genera/verifica un HMAC.
-  - Recibe: message
-  - Devuelve: hmac generado
-  (en versión extendida: validar el hmac que envía el cliente).
-  """
-  return jsonify({"success": True, "hmac": ""}), 200
+    """
+    Genera un HMAC de un mensaje (demostración educativa).
+    
+    Headers:
+        Authorization: Bearer <token_jwt>
+    
+    Body JSON:
+        {
+            "message": "texto a autenticar"
+        }
+    
+    Proceso:
+        1. Verifica el token JWT
+        2. Obtiene la clave HMAC del usuario
+        3. Genera HMAC-SHA256
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "message": "texto original",
+            "hmac": "hex_string_del_hmac",
+            "algorithm": "HMAC-SHA256",
+            "key_size": 256
+        }
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+        
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username = payload['username']
+        
+        # Obtener datos del request
+        data = request.get_json()
+        message = data.get('message')
+        
+        if not message:
+            return jsonify({'error': 'Mensaje requerido'}), 400
+        
+        # Obtener clave HMAC del usuario
+        hmac_key = get_user_hmac_key(username)
+        
+        # Generar HMAC
+        hmac_value = generate_hmac(message, hmac_key)
+        
+        logger.info(f"HMAC generado para usuario '{username}' (HMAC-SHA256, 256 bits)")
+        
+        return jsonify({
+            'success': True,
+            'message': message,
+            'hmac': hmac_value,
+            'algorithm': 'HMAC-SHA256',
+            'key_size': 256
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        logger.error(f"Error al generar HMAC: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-@app.route("/messages", methods=["POST"])
-def create_message():
-  """
-  Crea un mensaje
-  - Recibe: message, from, to
-  - Devuelve: 
-  """
-  return jsonify({"success": True}), 200
+@app.route('/hmac/verify', methods=['POST'])
+def hmac_verify():
+    """
+    Verifica un HMAC (demostración educativa).
+
+    Headers:
+        Authorization: Bearer <token_jwt>
+
+    Body JSON:
+        {
+            "message": "texto original",
+            "hmac": "hex_string_del_hmac_a_verificar"
+        }
+
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "valid": true/false,
+            "message": "HMAC válido" o "HMAC inválido"
+        }
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username = payload['username']
+
+        # Obtener datos del request
+        data = request.get_json()
+        message = data.get('message')
+        hmac_to_verify = data.get('hmac')
+
+        if not message or not hmac_to_verify:
+            return jsonify({'error': 'Mensaje y HMAC requeridos'}), 400
+
+        # Obtener clave HMAC del usuario
+        hmac_key = get_user_hmac_key(username)
+
+        # Verificar HMAC
+        is_valid = verify_hmac(message, hmac_to_verify, hmac_key)
+
+        logger.info(f"HMAC verificado para usuario '{username}': {'válido' if is_valid else 'inválido'}")
+
+        return jsonify({
+            'success': True,
+            'valid': is_valid,
+            'message': 'HMAC válido' if is_valid else 'HMAC inválido'
+        }), 200
+
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 401
+    except Exception as e:
+        logger.error(f"Error al verificar HMAC: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-@app.route("/messages", methods=["GET"])
-def list_messages():
-  """
-  Devuelve los mensajes de un usuario
-  - Recibe: from
-  - Devuelve: messages[]
-  """
-  return jsonify({"success": True, "messages": []}), 200
+@app.route('/reset_db', methods=['POST'])
+def reset_db():
+    """
+    Resetea la base de datos eliminando todos los datos.
+    Útil para limpiar el estado entre ejecuciones de tests.
+
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "message": "Base de datos reseteada correctamente"
+        }
+
+    Errores:
+        - 500: Error interno del servidor
+    """
+    try:
+        reset_database()
+        logger.info("Base de datos reseteada vía endpoint")
+        return jsonify({
+            'success': True,
+            'message': 'Base de datos reseteada correctamente'
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Error al resetear base de datos: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
 
 
 if __name__ == '__main__':
