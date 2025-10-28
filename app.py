@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request
 import logging
 from datetime import datetime
 from flasgger import Swagger
+from dotenv import load_dotenv
 from utils import (
     hash_password,
     verify_password,
@@ -30,6 +31,9 @@ from data_access import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Load environment variables from .env.local
+load_dotenv('.env.local')
 
 app = Flask(__name__)
 swagger = Swagger(app)
