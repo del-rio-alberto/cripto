@@ -8,6 +8,8 @@ import base64
 import secrets
 import logging
 import os
+import hmac
+import hashlib
 
 logger = logging.getLogger(__name__)
 
@@ -206,3 +208,69 @@ def decrypt_aes_gcm(ciphertext_b64: str, nonce_b64: str, tag_b64: str, key: byte
     except Exception as e:
         logger.error(f"Error en descifrado o verificación de tag: {str(e)}")
         raise ValueError("Descifrado falló: mensaje corrupto o clave incorrecta")
+
+
+def generate_hmac(message: str, key: bytes) -> str:
+    """
+    Genera un HMAC-SHA256 de un mensaje.
+    
+    Args:
+        message: Texto a autenticar
+        key: Clave secreta para HMAC (debe ser bytes)
+    
+    Returns:
+        HMAC en formato hexadecimal
+    
+    Ejemplo:
+        >>> key = secrets.token_bytes(32)
+        >>> hmac_value = generate_hmac("Hola mundo", key)
+        >>> print(f"HMAC: {hmac_value}")
+    """
+    # Convertir mensaje a bytes si es string
+    if isinstance(message, str):
+        message = message.encode('utf-8')
+    
+    # Generar HMAC usando SHA-256
+    h = hmac.new(key, message, hashlib.sha256)
+    
+    # Devolver en formato hexadecimal
+    return h.hexdigest()
+
+
+def verify_hmac(message: str, hmac_to_verify: str, key: bytes) -> bool:
+    """
+    Verifica un HMAC de forma segura contra timing attacks.
+    
+    Args:
+        message: Texto original
+        hmac_to_verify: HMAC a verificar (hex string)
+        key: Clave secreta para HMAC
+    
+    Returns:
+        True si el HMAC es válido, False en caso contrario
+    
+    Nota:
+        Usa hmac.compare_digest() para prevenir timing attacks
+    """
+    # Convertir mensaje a bytes si es string
+    if isinstance(message, str):
+        message = message.encode('utf-8')
+    
+    # Generar HMAC esperado
+    expected_hmac = generate_hmac(message, key)
+    
+    # Comparación segura contra timing attacks
+    return hmac.compare_digest(expected_hmac, hmac_to_verify)
+
+
+def generate_hmac_key() -> bytes:
+    """
+    Genera una clave aleatoria de 256 bits para HMAC.
+    
+    Returns:
+        Clave de 32 bytes (256 bits)
+    
+    Nota:
+        Usa secrets.token_bytes() para generación criptográficamente segura
+    """
+    return secrets.token_bytes(32)  # 256 bits
