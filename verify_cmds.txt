@@ -1,0 +1,5 @@
+register alice 12345678
+login alice 12345678
+encrypt "Hello World"
+hmac_gen "Important Message"
+exit
