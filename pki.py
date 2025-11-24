@@ -5,7 +5,7 @@ import os
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric import rsa, ec
 from cryptography.x509.oid import NameOID
 
 def generate_private_key(key_size=4096):
@@ -137,6 +137,111 @@ def setup_pki():
     save_pem(crl, "intermediate_ca.crl")
     
     print("Configuración PKI completada.")
+
+def issue_certificate(username, csr_pem):
+    """
+    Emite un certificado para un usuario basado en un CSR.
+    
+    Args:
+        username (str): Nombre del usuario (se usará como CN).
+        csr_pem (bytes): Contenido del CSR en formato PEM.
+        
+    Returns:
+        bytes: Certificado emitido en formato PEM.
+    """
+    # Cargar CA Intermedia y su clave
+    try:
+        ca_cert = load_certificate("intermediate_ca.crt")
+        ca_key = load_private_key("intermediate_ca.key")
+    except FileNotFoundError:
+        raise Exception("Error: CA Intermedia no encontrada. Ejecuta setup_pki() primero.")
+
+    # Cargar CSR
+    try:
+        csr = x509.load_pem_x509_csr(csr_pem)
+    except Exception as e:
+        raise ValueError(f"CSR inválido: {e}")
+
+    # Validar firma del CSR
+    if not csr.is_signature_valid:
+        raise ValueError("Firma del CSR inválida.")
+
+    # Validar que la clave pública sea EC P-256
+    public_key = csr.public_key()
+    if not isinstance(public_key, ec.EllipticCurvePublicKey):
+        raise ValueError("La clave pública debe ser de Curva Elíptica.")
+    if not isinstance(public_key.curve, ec.SECP256R1):
+        raise ValueError("La curva debe ser SECP256R1 (P-256).")
+
+    # Construir el certificado
+    # Forzamos el CN al username proporcionado para seguridad
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"ES"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Mi Organizacion"),
+        x509.NameAttribute(NameOID.COMMON_NAME, username),
+    ])
+
+    builder = x509.CertificateBuilder().subject_name(
+        subject
+    ).issuer_name(
+        ca_cert.subject
+    ).public_key(
+        public_key
+    ).serial_number(
+        x509.random_serial_number()
+    ).not_valid_before(
+        datetime.datetime.now(timezone.utc)
+    ).not_valid_after(
+        datetime.datetime.now(timezone.utc) + datetime.timedelta(days=365) # 1 año
+    )
+
+    # Añadir extensiones
+    # Basic Constraints: CA=False
+    builder = builder.add_extension(
+        x509.BasicConstraints(ca=False, path_length=None), critical=True,
+    )
+    
+    # Key Usage: digitalSignature, keyEncipherment
+    builder = builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=True,
+            content_commitment=False,
+            key_encipherment=True,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=False,
+            crl_sign=False,
+            encipher_only=False,
+            decipher_only=False
+        ),
+        critical=True
+    )
+
+    # Extended Key Usage: clientAuth
+    builder = builder.add_extension(
+        x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.CLIENT_AUTH]),
+        critical=False
+    )
+
+    # Firmar el certificado
+    cert = builder.sign(ca_key, hashes.SHA256())
+    
+    # Guardar certificado
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    
+    # Asegurar directorio certs
+    if not os.path.exists("certs"):
+        os.makedirs("certs")
+        
+    cert_filename = f"certs/{username}.crt"
+    with open(cert_filename, "wb") as f:
+        f.write(cert_pem)
+        
+    # Registrar en log
+    with open("issued_certs.log", "a") as log:
+        log.write(f"{cert.serial_number},{datetime.datetime.now(timezone.utc).isoformat()},{username},Valid\n")
+        
+    return cert_pem
 
 if __name__ == "__main__":
     setup_pki()
