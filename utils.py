@@ -106,7 +106,7 @@ def derive_key_from_password(password: str, salt: bytes) -> bytes:
     
     Parámetros:
         - Algoritmo: PBKDF2-HMAC-SHA256
-        - Iteraciones: 480000 (recomendación OWASP 2023)
+        - Iteraciones: 480000
         - Longitud de clave: 256 bits (32 bytes)
     
     Args:
@@ -120,7 +120,7 @@ def derive_key_from_password(password: str, salt: bytes) -> bytes:
         algorithm=hashes.SHA256(),
         length=32,  # 256 bits
         salt=salt,
-        iterations=480000,  # Recomendación OWASP 2023
+        iterations=480000,
     )
     key = kdf.derive(password.encode())
     logger.info("Clave derivada con PBKDF2-HMAC-SHA256 (480k iteraciones, 256 bits)")
