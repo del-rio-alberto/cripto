@@ -10,8 +10,8 @@ database          = $dir/index.txt
 serial            = $dir/serial
 RANDFILE          = $dir/private/.rand
 
-private_key       = $dir/root.key
-certificate       = $dir/root.crt
+private_key       = $dir/private/root.key.pem
+certificate       = $dir/certs/root.cert.pem
 
 default_md        = sha256
 name_opt          = ca_default
@@ -37,12 +37,19 @@ x509_extensions     = v3_ca
 
 [ req_distinguished_name ]
 countryName                     = Country Name (2 letter code)
+countryName_default             = ES
 stateOrProvinceName             = State or Province Name
+stateOrProvinceName_default     = Madrid
 localityName                    = Locality Name
+localityName_default            = Madrid
 0.organizationName              = Organization Name
+0.organizationName_default      = MyOrganization
 organizationalUnitName          = Organizational Unit Name
+organizationalUnitName_default  = IT
 commonName                      = Common Name
+commonName_default              = Root CA
 emailAddress                    = Email Address
+emailAddress_default            = root@example.com
 
 [ v3_ca ]
 subjectKeyIdentifier = hash
