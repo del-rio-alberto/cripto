@@ -26,3 +26,7 @@ Pasos para ejecutarlo:
 2. Verificar PKI
 
 ```venv/bin/python test_pki.py```
+
+3. Verificar 
+
+```openssl verify -CAfile pki/root/root.crt pki/intermediate/intermediate.crt```
