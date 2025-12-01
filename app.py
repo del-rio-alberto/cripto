@@ -1,41 +1,51 @@
 from flask import Flask, jsonify, request
 import logging
 import base64
+import os
 from datetime import datetime
 from flasgger import Swagger
 from dotenv import load_dotenv
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import hashes
+
+from pki_helper import (
+    verify_signature,
+    verify_certificate_chain
+)
+
+from pki import (
+    issue_certificate,
+    revoke_certificate,
+    load_certificate
+)
+
+from data_access import (
+    init_database,
+    reset_database,
+    create_user,
+    user_exists,
+    get_user_password_hash,
+    get_user_encryption_key,
+    get_user_hmac_key,
+    store_message,
+    get_user_messages,
+    get_message_by_id,
+    mark_message_as_read,
+    get_user_encrypted_private_key
+)
+
 from utils import (
     hash_password,
     verify_password,
     generate_jwt,
     verify_jwt,
-    generate_salt,
-    derive_key_from_password,
     encrypt_aes_gcm,
     decrypt_aes_gcm,
-    generate_hmac, 
+    generate_hmac,
     verify_hmac
 )
-from data_access import (
-    init_database,
-    create_user,
-    get_user_password_hash,
-    get_user_encryption_key,
-    user_exists,
-    get_user_hmac_key,
-    get_message_by_id,
-    get_user_messages,
-    mark_message_as_read,
-    store_message,
-    reset_database,
-    store_message,
-    reset_database,
-    get_user_encrypted_private_key
-)
-from pki_helper import verify_signature, verify_certificate_chain
+
 from user_keys import (
     generate_user_keypair,
     encrypt_private_key,
@@ -943,6 +953,192 @@ def pki_verify_chain():
     except Exception as e:
         logger.error(f"Error al verificar cadena: {str(e)}")
         return jsonify({'error': f'Error al verificar cadena: {str(e)}'}), 500
+
+
+@app.route('/cert/issue', methods=['POST'])
+def cert_issue():
+    """
+    Emite un certificado de usuario basado en un CSR.
+    
+    Body JSON:
+        {
+            "username": "nombre_usuario",
+            "csr_pem": "base64_del_csr_pem"
+        }
+    
+    Proceso:
+        1. Valida los datos de entrada
+        2. Decodifica el CSR de base64
+        3. Llama a issue_certificate() del módulo pki
+        4. Devuelve el certificado emitido en base64
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "certificate_pem": "base64_del_certificado",
+            "username": "nombre_usuario",
+            "message": "Certificado emitido exitosamente"
+        }
+    
+    Errores:
+        - 400: Datos faltantes o CSR inválido
+        - 500: Error interno del servidor
+    """
+    try:
+        data = request.get_json()
+        username = data.get('username')
+        csr_pem_b64 = data.get('csr_pem')
+        
+        # Validar datos de entrada
+        if not username or not csr_pem_b64:
+            return jsonify({'error': 'username y csr_pem son requeridos'}), 400
+        
+        # Decodificar CSR de base64
+        try:
+            csr_pem = base64.b64decode(csr_pem_b64)
+        except Exception as e:
+            return jsonify({'error': f'CSR base64 inválido: {str(e)}'}), 400
+        
+        # Emitir certificado
+        cert_pem = issue_certificate(username, csr_pem)
+        
+        # Codificar certificado a base64
+        cert_pem_b64 = base64.b64encode(cert_pem).decode('utf-8')
+        
+        logger.info(f"Certificado emitido para usuario '{username}'")
+        
+        return jsonify({
+            'success': True,
+            'certificate_pem': cert_pem_b64,
+            'username': username,
+            'message': 'Certificado emitido exitosamente'
+        }), 200
+        
+    except ValueError as e:
+        logger.error(f"Error de validación al emitir certificado: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error al emitir certificado: {str(e)}")
+        return jsonify({'error': f'Error al emitir certificado: {str(e)}'}), 500
+
+
+@app.route('/cert/revoke', methods=['POST'])
+def cert_revoke():
+    """
+    Revoca un certificado añadiéndolo a la CRL.
+    
+    Body JSON (opción 1 - por serial):
+        {
+            "serial": 123456789
+        }
+    
+    Body JSON (opción 2 - por username):
+        {
+            "username": "nombre_usuario"
+        }
+    
+    Proceso:
+        1. Valida que se proporcione serial o username
+        2. Si es username, busca el certificado y extrae el serial
+        3. Llama a revoke_certificate() del módulo pki
+        4. Devuelve confirmación de revocación
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "serial": 123456789,
+            "message": "Certificado revocado exitosamente"
+        }
+    
+    Errores:
+        - 400: Datos faltantes o inválidos
+        - 404: Certificado no encontrado (cuando se usa username)
+        - 500: Error interno del servidor
+    """
+    try:
+        data = request.get_json()
+        serial = data.get('serial')
+        username = data.get('username')
+        
+        # Validar que se proporcione al menos uno
+        if not serial and not username:
+            return jsonify({'error': 'Se requiere serial o username'}), 400
+        
+        # Si se proporciona username, buscar el certificado
+        if username and not serial:
+            cert_path = f"certs/{username}.crt"
+            if not os.path.exists(cert_path):
+                return jsonify({'error': f'Certificado no encontrado para usuario {username}'}), 404
+            
+            try:
+                cert = load_certificate(cert_path)
+                serial = cert.serial_number
+                logger.info(f"Certificado encontrado para '{username}' con serial {serial}")
+            except Exception as e:
+                return jsonify({'error': f'Error al cargar certificado: {str(e)}'}), 500
+        
+        # Revocar certificado
+        revoke_certificate(serial)
+        
+        logger.info(f"Certificado con serial {serial} revocado exitosamente")
+        
+        return jsonify({
+            'success': True,
+            'serial': serial,
+            'message': 'Certificado revocado exitosamente'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error al revocar certificado: {str(e)}")
+        return jsonify({'error': f'Error al revocar certificado: {str(e)}'}), 500
+
+
+@app.route('/cert/crl', methods=['GET'])
+def cert_get_crl():
+    """
+    Devuelve la CRL (Certificate Revocation List) actual.
+    
+    Proceso:
+        1. Lee el archivo intermediate_ca.crl del disco
+        2. Codifica el contenido en base64
+        3. Devuelve la CRL
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "crl_pem": "base64_de_la_crl",
+            "message": "CRL obtenida exitosamente"
+        }
+    
+    Errores:
+        - 404: CRL no encontrada
+        - 500: Error interno del servidor
+    """
+    try:
+        crl_path = "intermediate_ca.crl"
+        
+        # Verificar que existe el archivo CRL
+        if not os.path.exists(crl_path):
+            return jsonify({'error': 'CRL no encontrada'}), 404
+        
+        # Leer CRL del disco
+        with open(crl_path, "rb") as f:
+            crl_pem = f.read()
+        
+        # Codificar a base64
+        crl_pem_b64 = base64.b64encode(crl_pem).decode('utf-8')
+        
+        logger.info("CRL obtenida exitosamente")
+        
+        return jsonify({
+            'success': True,
+            'crl_pem': crl_pem_b64,
+            'message': 'CRL obtenida exitosamente'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error al obtener CRL: {str(e)}")
+        return jsonify({'error': f'Error al obtener CRL: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
