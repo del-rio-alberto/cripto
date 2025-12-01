@@ -1,8 +1,12 @@
 from flask import Flask, jsonify, request
 import logging
+import base64
 from datetime import datetime
 from flasgger import Swagger
 from dotenv import load_dotenv
+from cryptography import x509
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import hashes
 from utils import (
     hash_password,
     verify_password,
@@ -28,6 +32,7 @@ from data_access import (
     store_message,
     reset_database
 )
+from pki_helper import verify_signature, verify_certificate_chain
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -788,6 +793,126 @@ def reset_db():
     except Exception as e:
         logger.error(f"Error al resetear base de datos: {str(e)}")
         return jsonify({'error': 'Error interno del servidor'}), 500
+
+
+@app.route('/pki/verify-signature', methods=['POST'])
+def pki_verify_signature():
+    """
+    Verifica una firma digital usando la clave pública de un certificado.
+    
+    Body JSON:
+        {
+            "certificate_pem": "base64_del_certificado_pem",
+            "signature": "base64_de_la_firma",
+            "data": "datos_originales"
+        }
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "valid": true/false,
+            "message": "Firma válida" o "Firma inválida"
+        }
+    
+    Errores:
+        - 400: Datos faltantes o inválidos
+        - 500: Error interno del servidor
+    """
+    try:
+        data = request.get_json()
+        cert_pem_b64 = data.get('certificate_pem')
+        signature_b64 = data.get('signature')
+        message_data = data.get('data')
+        
+        if not all([cert_pem_b64, signature_b64, message_data]):
+            return jsonify({'error': 'certificate_pem, signature y data son requeridos'}), 400
+        
+        # Decodificar base64
+        cert_pem = base64.b64decode(cert_pem_b64)
+        signature = base64.b64decode(signature_b64)
+        data_bytes = message_data.encode('utf-8')
+        
+        # Cargar certificado y extraer clave pública
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        public_key = cert.public_key()
+        
+        # Verificar firma
+        is_valid = verify_signature(public_key, signature, data_bytes)
+        
+        logger.info(f"Verificación de firma: {'válida' if is_valid else 'inválida'}")
+        
+        return jsonify({
+            'success': True,
+            'valid': is_valid,
+            'message': 'Firma válida' if is_valid else 'Firma inválida'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error al verificar firma: {str(e)}")
+        return jsonify({'error': f'Error al verificar firma: {str(e)}'}), 500
+
+
+@app.route('/pki/verify-chain', methods=['POST'])
+def pki_verify_chain():
+    """
+    Verifica la cadena completa de certificados y CRL.
+    
+    Body JSON:
+        {
+            "user_cert_pem": "base64_del_certificado_usuario",
+            "intermediate_cert_pem": "base64_del_certificado_intermedio",
+            "root_cert_pem": "base64_del_certificado_raiz",
+            "crl_pem": "base64_de_la_crl"
+        }
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "valid": true/false,
+            "message": "Cadena válida" o "Cadena inválida"
+        }
+    
+    Errores:
+        - 400: Datos faltantes o inválidos
+        - 500: Error interno del servidor
+    """
+    try:
+        data = request.get_json()
+        user_cert_b64 = data.get('user_cert_pem')
+        inter_cert_b64 = data.get('intermediate_cert_pem')
+        root_cert_b64 = data.get('root_cert_pem')
+        crl_b64 = data.get('crl_pem')
+        
+        if not all([user_cert_b64, inter_cert_b64, root_cert_b64, crl_b64]):
+            return jsonify({
+                'error': 'user_cert_pem, intermediate_cert_pem, root_cert_pem y crl_pem son requeridos'
+            }), 400
+        
+        # Decodificar base64
+        user_cert_pem = base64.b64decode(user_cert_b64)
+        inter_cert_pem = base64.b64decode(inter_cert_b64)
+        root_cert_pem = base64.b64decode(root_cert_b64)
+        crl_pem = base64.b64decode(crl_b64)
+        
+        # Verificar cadena
+        is_valid = verify_certificate_chain(
+            user_cert_pem,
+            inter_cert_pem,
+            root_cert_pem,
+            crl_pem
+        )
+        
+        logger.info(f"Verificación de cadena: {'válida' if is_valid else 'inválida'}")
+        
+        return jsonify({
+            'success': True,
+            'valid': is_valid,
+            'message': 'Cadena válida' if is_valid else 'Cadena inválida'
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error al verificar cadena: {str(e)}")
+        return jsonify({'error': f'Error al verificar cadena: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
