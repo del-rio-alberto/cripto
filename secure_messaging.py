@@ -1,11 +1,13 @@
+import os
 import base64
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from hybrid_encryption import derive_shared_key, encrypt_message
-from digital_signature import sign_message
+from hybrid_encryption import derive_shared_key, encrypt_message, decrypt_message
+from digital_signature import sign_message, verify_message_signature
 from user_keys import generate_user_keypair, _serialize_public_key
+from pki_helper import verify_certificate_chain
 
 def send_secure_message(sender, receiver, message_text):
     """
@@ -122,3 +124,103 @@ def send_secure_message(sender, receiver, message_text):
         "cert_emisor": sender_cert_pem,
         "pubkey_efimera": ephemeral_public_key_pem
     }
+
+
+def _load_file(path):
+    with open(path, 'rb') as f:
+        return f.read()
+
+
+def receive_secure_message(receiver, payload_dict):
+    """
+    Recibe y descifra un mensaje seguro.
+    
+    Pasos:
+    1. Verificar certificado del emisor (cadena + CRL).
+    2. Usar pubkey_efimera_emisor + clave_privada_receptor -> ECDH.
+    3. Derivar shared_key.
+    4. Verificar firma.
+    5. Descifrar AES-GCM.
+    6. Devolver plaintext.
+    
+    Args:
+        receiver: Diccionario con 'private_key' (EC Private Key obj o PEM)
+                  o directamente la clave privada.
+        payload_dict: Diccionario recibido de send_secure_message.
+        
+    Returns:
+        str: Mensaje en texto plano.
+        
+    Raises:
+        ValueError: Si falla validación, firma o descifrado.
+    """
+    # Extraer datos del payload
+    try:
+        ciphertext_b64 = payload_dict['ciphertext']
+        nonce_b64 = payload_dict['nonce']
+        signature_b64 = payload_dict['signature']
+        sender_cert_pem = payload_dict['cert_emisor']
+        ephemeral_pub_pem = payload_dict['pubkey_efimera']
+    except KeyError as e:
+        raise ValueError(f"Payload incompleto, falta: {e}")
+
+    # 1. Verificar certificado del emisor
+    # Cargar artefactos PKI (Root CA, Intermediate CA, CRL)
+    root_pem = None
+    inter_pem = None
+    crl_pem = None
+    
+    # Rutas posibles
+    possible_roots = ["root_ca.crt", "pki/root/certs/root.cert.pem"]
+    possible_inters = ["intermediate_ca.crt", "pki/intermediate/intermediate.crt"]
+    possible_crls = ["intermediate_ca.crl", "pki/intermediate/crl.pem"]
+    
+    for p in possible_roots:
+        if os.path.exists(p):
+            root_pem = _load_file(p)
+            break
+            
+    for p in possible_inters:
+        if os.path.exists(p):
+            inter_pem = _load_file(p)
+            break
+            
+    for p in possible_crls:
+        if os.path.exists(p):
+            crl_pem = _load_file(p)
+            break
+            
+    if not root_pem or not inter_pem:
+        raise ValueError("No se encontraron los certificados de CA (Root/Intermediate) en el sistema")
+        
+    if not crl_pem:
+        raise ValueError("No se encontró la CRL en el sistema")
+        
+    # Validar cadena
+    sender_cert_bytes = sender_cert_pem.encode('utf-8') if isinstance(sender_cert_pem, str) else sender_cert_pem
+    
+    if not verify_certificate_chain(sender_cert_bytes, inter_pem, root_pem, crl_pem):
+        raise ValueError("Validación de certificado del emisor fallida (Cadena o CRL inválidos)")
+        
+    # 2. Obtener clave privada del receptor
+    receiver_private_key = None
+    if isinstance(receiver, dict):
+        receiver_private_key = receiver.get('private_key')
+    else:
+        receiver_private_key = receiver
+        
+    if not receiver_private_key:
+        raise ValueError("Se requiere la clave privada del receptor")
+        
+    # 3. Derivar clave compartida
+    shared_key = derive_shared_key(receiver_private_key, ephemeral_pub_pem)
+    
+    # 4. Verificar firma
+    msg_to_verify = ciphertext_b64.encode('utf-8')
+    if not verify_message_signature(sender_cert_pem, msg_to_verify, signature_b64):
+        raise ValueError("Firma del mensaje inválida")
+        
+    # 5. Descifrar mensaje
+    plaintext_bytes = decrypt_message(shared_key, ciphertext_b64, nonce_b64)
+    
+    return plaintext_bytes.decode('utf-8')
