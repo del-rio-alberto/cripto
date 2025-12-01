@@ -26,13 +26,14 @@ from data_access import (
     create_user,
     user_exists,
     get_user_password_hash,
-    get_user_encryption_key,
-    get_user_hmac_key,
     store_message,
     get_user_messages,
     get_message_by_id,
     mark_message_as_read,
-    get_user_encrypted_private_key
+    get_user_encrypted_private_key,
+    get_user_private_key_salt,
+    get_user_certificate,
+    update_user_certificate
 )
 
 from utils import (
@@ -40,10 +41,8 @@ from utils import (
     verify_password,
     generate_jwt,
     verify_jwt,
-    encrypt_aes_gcm,
-    decrypt_aes_gcm,
-    generate_hmac,
-    verify_hmac
+    generate_salt,
+    derive_key_from_password
 )
 
 from user_keys import (
@@ -51,6 +50,11 @@ from user_keys import (
     encrypt_private_key,
     decrypt_private_key,
     get_public_key_pem
+)
+
+from secure_messaging import (
+    send_secure_message,
+    receive_secure_message
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -119,20 +123,23 @@ def register():
     # 2. Generar salt para derivación de clave
     salt = generate_salt()
 
-    # 3. Derivar clave de cifrado del usuario
-    encryption_key = derive_key_from_password(password, salt)
-
-    # 4. Generar par de claves EC P-256
+    # 3. Generar par de claves EC P-256
     private_key, public_key = generate_user_keypair()
     
-    # 5. Cifrar clave privada con la contraseña del usuario
+    # 4. Cifrar clave privada con la contraseña del usuario
     encrypted_private_key = encrypt_private_key(private_key, password)
     
-    # 6. Obtener clave pública en formato PEM
+    # 5. Obtener clave pública en formato PEM
     public_key_pem = get_public_key_pem(private_key)
 
-    # 7. Guardar en base de datos (todo junto)
-    create_user(username, password_hash, salt, encryption_key, encrypted_private_key, public_key_pem)
+    # 6. Guardar en base de datos (certificado vacío inicialmente)
+    # El salt de la clave privada se genera dentro de encrypt_private_key
+    # Necesitamos extraerlo del JSON
+    import json
+    encrypted_data = json.loads(encrypted_private_key)
+    private_key_salt = base64.b64decode(encrypted_data['salt'])
+    
+    create_user(username, password_hash, salt, encrypted_private_key, private_key_salt, public_key_pem, "")
 
     logger.info(f"Usuario '{username}' registrado exitosamente con keypair EC P-256")
 
@@ -383,7 +390,7 @@ def decrypt():
 @app.route('/messages', methods=['POST'])
 def send_message():
     """
-    Envía un mensaje cifrado a otro usuario.
+    Envía un mensaje cifrado y firmado a otro usuario usando certificados X.509.
     
     Headers:
         Authorization: Bearer <token_jwt>
@@ -391,15 +398,21 @@ def send_message():
     Body JSON:
         {
             "to": "username_destinatario",
-            "message": "texto del mensaje"
+            "message": "texto del mensaje",
+            "password": "contraseña_del_remitente"  # Necesaria para descifrar clave privada
         }
     
     Proceso:
         1. Verifica el token JWT del remitente
-        2. Verifica que el destinatario existe
-        3. Cifra el mensaje con AES-256-GCM usando la clave del REMITENTE
-        4. Almacena el mensaje cifrado en la BD
-        5. Genera un HMAC del mensaje para integridad adicional
+        2. Verifica que el destinatario existe y tiene certificado
+        3. Descifra la clave privada del remitente con su contraseña
+        4. Obtiene certificados del remitente y destinatario
+        5. Llama a send_secure_message() que:
+           - Genera par de claves efímero
+           - Deriva clave compartida con ECDH
+           - Cifra con AES-256-GCM
+           - Firma con clave privada del remitente
+        6. Almacena el payload completo en la BD
     
     Respuesta exitosa (201):
         {
@@ -407,18 +420,18 @@ def send_message():
             "message_id": 123,
             "from": "username_remitente",
             "to": "username_destinatario",
-            "timestamp": "2025-10-28T10:30:00",
+            "timestamp": "2025-12-01T10:30:00",
             "encryption_info": {
-                "algorithm": "AES-256-GCM",
-                "key_size": 256,
-                "authenticated": true
+                "algorithm": "ECDH + AES-256-GCM",
+                "signature_algorithm": "ECDSA-SHA256",
+                "certificate_verified": true
             }
         }
     
     Errores:
         - 400: Datos faltantes o inválidos
-        - 401: Token inválido o ausente
-        - 404: Usuario destinatario no encontrado
+        - 401: Token inválido o contraseña incorrecta
+        - 404: Usuario destinatario no encontrado o sin certificado
         - 500: Error interno del servidor
     """
     try:
@@ -435,43 +448,72 @@ def send_message():
         data = request.get_json()
         username_to = data.get('to')
         message_text = data.get('message')
+        password = data.get('password')
         
         # Validar datos de entrada
         if not username_to or not message_text:
             return jsonify({'error': 'Destinatario y mensaje requeridos'}), 400
+            
+        if not password:
+            return jsonify({'error': 'Contraseña requerida para descifrar clave privada'}), 400
         
         if not user_exists(username_to):
             return jsonify({'error': 'Usuario destinatario no encontrado'}), 404
         
-        # Obtener clave de cifrado del remitente
-        encryption_key = get_user_encryption_key(username_from)
+        # Obtener certificado del remitente
+        sender_cert_pem = get_user_certificate(username_from)
+        if not sender_cert_pem:
+            return jsonify({
+                'error': 'El remitente no tiene certificado emitido. Use POST /cert/issue primero.'
+            }), 400
         
-        # Cifrar mensaje con AES-256-GCM (incluye autenticación)
-        encrypted_data = encrypt_aes_gcm(message_text, encryption_key)
+        # Obtener certificado del destinatario
+        receiver_cert_pem = get_user_certificate(username_to)
+        if not receiver_cert_pem:
+            return jsonify({
+                'error': f'El destinatario {username_to} no tiene certificado emitido.'
+            }), 404
         
-        # Generar HMAC adicional para demostrar conocimiento
-        # (aunque GCM ya autentica, esto es para mostrar HMAC explícitamente)
-        hmac_key = get_user_hmac_key(username_from)
-        message_hmac = generate_hmac(message_text, hmac_key)
+        # Descifrar clave privada del remitente
+        encrypted_private_key_blob = get_user_encrypted_private_key(username_from)
+        if not encrypted_private_key_blob:
+            return jsonify({'error': 'No se encontró clave privada del remitente'}), 500
         
-        # Guardar mensaje en BD
+        try:
+            sender_private_key = decrypt_private_key(encrypted_private_key_blob, password)
+        except ValueError as e:
+            logger.warning(f"Contraseña incorrecta para usuario '{username_from}'")
+            return jsonify({'error': 'Contraseña incorrecta'}), 401
+        
+        # Preparar sender y receiver para send_secure_message
+        sender = {
+            'private_key': sender_private_key,
+            'cert': sender_cert_pem
+        }
+        
+        receiver = {
+            'cert': receiver_cert_pem
+        }
+        
+        # Enviar mensaje seguro
+        secure_payload = send_secure_message(sender, receiver, message_text)
+        
+        # Guardar en base de datos
         timestamp = datetime.now().isoformat()
         message_id = store_message(
             username_from=username_from,
             username_to=username_to,
-            ciphertext=encrypted_data['ciphertext'],
-            nonce=encrypted_data['nonce'],
-            tag=encrypted_data['tag'],
-            hmac=message_hmac,
+            ciphertext=secure_payload['ciphertext'],
+            nonce=secure_payload['nonce'],
+            signature=secure_payload['signature'],
+            cert_emisor=secure_payload['cert_emisor'],
+            ephemeral_pubkey=secure_payload['pubkey_efimera'],  # Mapear pubkey_efimera -> ephemeral_pubkey
             timestamp=timestamp
         )
         
-        timestamp = datetime.now().isoformat()
-        
         logger.info(
-            f"Mensaje enviado: {username_from} -> {username_to} "
-            f"(ID: {message_id}, Algoritmo: AES-256-GCM, "
-            f"Tag autenticación: {encrypted_data['tag'][:16]}...)"
+            f"Mensaje seguro enviado: {username_from} -> {username_to} "
+            f"(ID: {message_id}, ECDH + AES-256-GCM + ECDSA)"
         )
         
         return jsonify({
@@ -481,18 +523,19 @@ def send_message():
             'to': username_to,
             'timestamp': timestamp,
             'encryption_info': {
-                'algorithm': 'AES-256-GCM',
-                'key_size': 256,
-                'authenticated': True,
-                'hmac_algorithm': 'HMAC-SHA256'
+                'algorithm': 'ECDH + AES-256-GCM',
+                'signature_algorithm': 'ECDSA-SHA256',
+                'certificate_verified': True
             }
         }), 201
         
     except ValueError as e:
-        return jsonify({'error': str(e)}), 401
+        logger.error(f"Error de validación: {str(e)}")
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
         logger.error(f"Error al enviar mensaje: {str(e)}")
         return jsonify({'error': 'Error interno del servidor'}), 500
+
 
 
 @app.route('/messages', methods=['GET'])
@@ -563,19 +606,25 @@ def get_messages():
 @app.route('/messages/<int:message_id>', methods=['GET'])
 def read_message(message_id):
     """
-    Lee y descifra un mensaje específico.
+    Lee y descifra un mensaje específico usando certificados X.509.
     
     Headers:
         Authorization: Bearer <token_jwt>
+    
+    Query params:
+        password: Contraseña del usuario para descifrar su clave privada
     
     Proceso:
         1. Verifica el token JWT
         2. Verifica que el mensaje pertenece al usuario
         3. Obtiene el mensaje cifrado de la BD
-        4. Para descifrarlo, necesita la clave del REMITENTE
-           (simplificación: usamos clave del destinatario)
-        5. Verifica HMAC y tag GCM
-        6. Descifra el mensaje
+        4. Reconstruye el payload con todos los campos
+        5. Descifra la clave privada del receptor
+        6. Llama a receive_secure_message() que:
+           - Verifica certificado del emisor (cadena + CRL)
+           - Verifica firma digital
+           - Deriva clave compartida con ECDH
+           - Descifra con AES-256-GCM
         7. Marca como leído
     
     Respuesta exitosa (200):
@@ -585,10 +634,11 @@ def read_message(message_id):
             "from": "username_remitente",
             "to": "username_destinatario",
             "message": "texto descifrado",
-            "timestamp": "2025-10-28T10:30:00",
+            "timestamp": "2025-12-01T10:30:00",
             "verification": {
-                "gcm_tag_valid": true,
-                "hmac_valid": true
+                "certificate_valid": true,
+                "signature_valid": true,
+                "chain_verified": true
             }
         }
     
@@ -596,7 +646,7 @@ def read_message(message_id):
         - 401: Token inválido o ausente
         - 403: Mensaje no pertenece al usuario
         - 404: Mensaje no encontrado
-        - 400: Verificación de integridad falló
+        - 400: Verificación de certificado o firma falló
         - 500: Error interno del servidor
     """
     try:
@@ -608,6 +658,11 @@ def read_message(message_id):
         token = auth_header.split(' ')[1]
         payload = verify_jwt(token)
         username = payload['username']
+        
+        # Obtener contraseña del query param
+        password = request.args.get('password')
+        if not password:
+            return jsonify({'error': 'Contraseña requerida para descifrar clave privada'}), 400
         
         # Obtener mensaje de la BD
         message_data = get_message_by_id(message_id)
@@ -625,39 +680,64 @@ def read_message(message_id):
             return jsonify({'error': 'No autorizado para leer este mensaje'}), 403
         logger.info(f"Acceso autorizado para '{username}' leer mensaje ID {message_id}")
         
-        # Obtener clave del remitente para descifrar
-        encryption_key = get_user_encryption_key(message_data['username_from'])
-
-        if not encryption_key:
-            return jsonify({'error': 'Usuario remitente no encontrado'}), 404
+        # Descifrar clave privada del receptor
+        encrypted_private_key_blob = get_user_encrypted_private_key(username)
+        if not encrypted_private_key_blob:
+            return jsonify({'error': 'No se encontró clave privada del receptor'}), 500
         
-        # Descifrar con AES-256-GCM (verifica tag automáticamente)
         try:
-            plaintext = decrypt_aes_gcm(
-                message_data['ciphertext'],
-                message_data['nonce'],
-                message_data['tag'],
-                encryption_key
-            )
-            gcm_valid = True
-        except ValueError:
-            logger.error(f"Tag GCM inválido para mensaje {message_id}")
-            return jsonify({'error': 'Mensaje corrupto o manipulado (GCM tag inválido)'}), 400
+            receiver_private_key = decrypt_private_key(encrypted_private_key_blob, password)
+        except ValueError as e:
+            logger.warning(f"Contraseña incorrecta para usuario '{username}'")
+            return jsonify({'error': 'Contraseña incorrecta'}), 401
         
-        # Verificar HMAC adicional
-        hmac_key = get_user_hmac_key(message_data['username_from'])
-        hmac_valid = verify_hmac(plaintext, message_data['hmac'], hmac_key)
+        # Reconstruir payload para receive_secure_message
+        payload_dict = {
+            'ciphertext': message_data['ciphertext'],
+            'nonce': message_data['nonce'],
+            'signature': message_data['signature'],
+            'cert_emisor': message_data['cert_emisor'],
+            'pubkey_efimera': message_data['ephemeral_pubkey']  # Mapear ephemeral_pubkey -> pubkey_efimera
+        }
         
-        if not hmac_valid:
-            logger.warning(f"HMAC inválido para mensaje {message_id}")
-            return jsonify({'error': 'Mensaje corrupto o manipulado (HMAC inválido)'}), 400
+        # Preparar receiver
+        receiver = {
+            'private_key': receiver_private_key
+        }
+        
+        # Recibir y descifrar mensaje seguro
+        try:
+            plaintext = receive_secure_message(receiver, payload_dict)
+            certificate_valid = True
+            signature_valid = True
+            chain_verified = True
+        except ValueError as e:
+            error_msg = str(e)
+            logger.error(f"Error al verificar/descifrar mensaje {message_id}: {error_msg}")
+            
+            # Determinar tipo de error
+            if 'certificado' in error_msg.lower() or 'cadena' in error_msg.lower():
+                return jsonify({
+                    'error': 'Verificación de certificado falló',
+                    'details': error_msg
+                }), 400
+            elif 'firma' in error_msg.lower():
+                return jsonify({
+                    'error': 'Verificación de firma falló',
+                    'details': error_msg
+                }), 400
+            else:
+                return jsonify({
+                    'error': 'Error al descifrar mensaje',
+                    'details': error_msg
+                }), 400
         
         # Marcar como leído
         mark_message_as_read(message_id)
         
         logger.info(
             f"Mensaje {message_id} leído por '{username}' "
-            f"(GCM válido: {gcm_valid}, HMAC válido: {hmac_valid})"
+            f"(Certificado válido, Firma válida, Cadena verificada)"
         )
         
         return jsonify({
@@ -668,8 +748,9 @@ def read_message(message_id):
             'message': plaintext,
             'timestamp': message_data['timestamp'],
             'verification': {
-                'gcm_tag_valid': gcm_valid,
-                'hmac_valid': hmac_valid
+                'certificate_valid': certificate_valid,
+                'signature_valid': signature_valid,
+                'chain_verified': chain_verified
             }
         }), 200
         
@@ -678,6 +759,7 @@ def read_message(message_id):
     except Exception as e:
         logger.error(f"Error al leer mensaje: {str(e)}")
         return jsonify({'error': 'Error interno del servidor'}), 500
+
 
 
 @app.route('/hmac/generate', methods=['POST'])

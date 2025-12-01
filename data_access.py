@@ -28,11 +28,10 @@ def init_database():
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
-            encrypted_private_key TEXT NOT NULL,
+            private_key_encrypted TEXT NOT NULL,
+            private_key_salt TEXT NOT NULL,
             public_key_pem TEXT NOT NULL,
-            certificate_pem TEXT,
-            encryption_key TEXT NOT NULL,
-            hmac_key TEXT NOT NULL,
+            certificate_pem TEXT NOT NULL,  
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -45,8 +44,9 @@ def init_database():
             username_to TEXT NOT NULL,
             ciphertext TEXT NOT NULL,
             nonce TEXT NOT NULL,
-            tag TEXT NOT NULL,
             signature TEXT NOT NULL,
+            cert_emisor TEXT NOT NULL,
+            ephemeral_pubkey TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             read INTEGER DEFAULT 0,
             FOREIGN KEY (username_from) REFERENCES users(username),
@@ -82,38 +82,35 @@ def get_db_connection():
     return conn
 
 
-def create_user(username: str, password_hash: str, salt: bytes, encryption_key: bytes, encrypted_private_key: str, public_key_pem: str) -> None:
+def create_user(username: str, password_hash: str, salt: bytes, private_key_encrypted: str, private_key_salt: bytes, public_key_pem: str, certificate_pem: str = "") -> None:
     """
     Crea un nuevo usuario en la base de datos con todas sus claves.
     
     Args:
         username: Nombre del usuario
         password_hash: Hash de la contraseña (bcrypt)
-        salt: Salt para derivación de clave
-        encryption_key: Clave de cifrado AES derivada
-        encrypted_private_key: Clave privada cifrada (JSON)
+        salt: Salt para derivación de clave (para password)
+        private_key_encrypted: Clave privada cifrada (JSON)
+        private_key_salt: Salt usado para cifrar la clave privada
         public_key_pem: Clave pública (PEM)
+        certificate_pem: Certificado X.509 (PEM) - opcional al crear
     """
     conn = get_db_connection()
     cursor = conn.cursor()
     
-    # Generar clave HMAC para el usuario
-    hmac_key = generate_hmac_key()
-    
     # Convertir a base64 para almacenar
     salt_b64 = base64.b64encode(salt).decode('utf-8')
-    encryption_key_b64 = base64.b64encode(encryption_key).decode('utf-8')
-    hmac_key_b64 = base64.b64encode(hmac_key).decode('utf-8')
+    private_key_salt_b64 = base64.b64encode(private_key_salt).decode('utf-8')
     
     cursor.execute('''
         INSERT INTO users (
-            username, password_hash, salt, encryption_key, hmac_key,
-            encrypted_private_key, public_key_pem
+            username, password_hash, salt, private_key_encrypted, private_key_salt,
+            public_key_pem, certificate_pem
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ''', (
-        username, password_hash, salt_b64, encryption_key_b64, hmac_key_b64,
-        encrypted_private_key, public_key_pem
+        username, password_hash, salt_b64, private_key_encrypted, private_key_salt_b64,
+        public_key_pem, certificate_pem
     ))
     
     conn.commit()
@@ -140,27 +137,7 @@ def get_user_password_hash(username: str) -> Optional[str]:
     return row['password_hash'] if row else None
 
 
-def get_user_encryption_key(username: str) -> Optional[bytes]:
-    """
-    Obtiene la clave de cifrado de un usuario.
-    
-    Args:
-        username: Nombre del usuario
-        
-    Returns:
-        Clave de cifrado de 32 bytes o None si el usuario no existe
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('SELECT encryption_key FROM users WHERE username = ?', (username,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    if not row:
-        return None
-    
-    return base64.b64decode(row['encryption_key'])
+
 
 
 def user_exists(username: str) -> bool:
@@ -183,7 +160,9 @@ def user_exists(username: str) -> bool:
     return exists
 
 
-def store_message(username_from: str, username_to: str, ciphertext: str, nonce: str, tag: str, hmac: str, timestamp: str) -> int:
+def store_message(username_from: str, username_to: str, ciphertext: str, nonce: str, 
+                  signature: str, cert_emisor: str, ephemeral_pubkey: str, 
+                  timestamp: str) -> int:
     """
     Guarda un mensaje cifrado en la base de datos.
 
@@ -192,8 +171,9 @@ def store_message(username_from: str, username_to: str, ciphertext: str, nonce: 
         username_to: Usuario destinatario
         ciphertext: Mensaje cifrado en base64
         nonce: Nonce usado en el cifrado (base64)
-        tag: Tag de autenticación (base64)
-        hmac: HMAC del mensaje
+        signature: Firma digital del mensaje (base64)
+        cert_emisor: Certificado del emisor (PEM)
+        ephemeral_pubkey: Clave pública efímera (PEM)
         timestamp: Timestamp del mensaje
 
     Returns:
@@ -203,9 +183,11 @@ def store_message(username_from: str, username_to: str, ciphertext: str, nonce: 
     cursor = conn.cursor()
 
     cursor.execute('''
-        INSERT INTO messages (username_from, username_to, ciphertext, nonce, tag, hmac, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    ''', (username_from, username_to, ciphertext, nonce, tag, hmac, timestamp))
+        INSERT INTO messages (username_from, username_to, ciphertext, nonce, 
+                            signature, cert_emisor, ephemeral_pubkey, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (username_from, username_to, ciphertext, nonce, 
+          signature, cert_emisor, ephemeral_pubkey, timestamp))
 
     message_id = cursor.lastrowid
     conn.commit()
@@ -260,31 +242,7 @@ def get_user_messages(username: str, unread_only: bool) -> list:
     return messages
 
 
-def get_user_hmac_key(username: str) -> Optional[bytes]:
-    """
-    Obtiene la clave HMAC de un usuario.
-    
-    Args:
-        username: Nombre del usuario
-    
-    Returns:
-        Clave HMAC en bytes o None si no existe
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute(
-        'SELECT hmac_key FROM users WHERE username = ?',
-        (username,)
-    )
-    row = cursor.fetchone()
-    conn.close()
-    
-    if not row or not row['hmac_key']:
-        return None
-    
-    # La clave está almacenada en base64
-    return base64.b64decode(row['hmac_key'])
+
 
 
 def get_message_by_id(message_id: int) -> Optional[Dict]:
@@ -307,8 +265,9 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
             username_to,
             ciphertext,
             nonce,
-            tag,
-            hmac,
+            signature,
+            cert_emisor,
+            ephemeral_pubkey,
             timestamp,
             read
         FROM messages
@@ -327,8 +286,9 @@ def get_message_by_id(message_id: int) -> Optional[Dict]:
         'username_to': row['username_to'],
         'ciphertext': row['ciphertext'],
         'nonce': row['nonce'],
-        'tag': row['tag'],
-        'hmac': row['hmac'],
+        'signature': row['signature'],
+        'cert_emisor': row['cert_emisor'],
+        'ephemeral_pubkey': row['ephemeral_pubkey'],
         'timestamp': row['timestamp'],
         'read': bool(row['read'])
     }
@@ -370,13 +330,39 @@ def get_user_encrypted_private_key(username: str) -> Optional[str]:
     cursor = conn.cursor()
     
     cursor.execute(
-        'SELECT encrypted_private_key FROM users WHERE username = ?',
+        'SELECT private_key_encrypted FROM users WHERE username = ?',
         (username,)
     )
     row = cursor.fetchone()
     conn.close()
     
-    return row['encrypted_private_key'] if row else None
+    return row['private_key_encrypted'] if row else None
+
+
+def get_user_private_key_salt(username: str) -> Optional[bytes]:
+    """
+    Obtiene el salt usado para cifrar la clave privada de un usuario.
+    
+    Args:
+        username: Nombre del usuario
+        
+    Returns:
+        Salt en bytes o None si no existe
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        'SELECT private_key_salt FROM users WHERE username = ?',
+        (username,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    
+    if not row or not row['private_key_salt']:
+        return None
+    
+    return base64.b64decode(row['private_key_salt'])
 
 
 def get_user_public_key(username: str) -> Optional[str]:
@@ -393,13 +379,57 @@ def get_user_public_key(username: str) -> Optional[str]:
     cursor = conn.cursor()
     
     cursor.execute(
-        'SELECT public_key FROM users WHERE username = ?',
+        'SELECT public_key_pem FROM users WHERE username = ?',
         (username,)
     )
     row = cursor.fetchone()
     conn.close()
     
-    return row['public_key'] if row else None
+    return row['public_key_pem'] if row else None
+
+
+def get_user_certificate(username: str) -> Optional[str]:
+    """
+    Obtiene el certificado X.509 de un usuario.
+    
+    Args:
+        username: Nombre del usuario
+        
+    Returns:
+        Certificado en formato PEM o None si no existe
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        'SELECT certificate_pem FROM users WHERE username = ?',
+        (username,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    
+    return row['certificate_pem'] if row else None
+
+
+def update_user_certificate(username: str, certificate_pem: str) -> None:
+    """
+    Actualiza el certificado X.509 de un usuario.
+    
+    Args:
+        username: Nombre del usuario
+        certificate_pem: Certificado en formato PEM
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        'UPDATE users SET certificate_pem = ? WHERE username = ?',
+        (certificate_pem, username)
+    )
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"Certificado actualizado para usuario '{username}'")
 
 
 def reset_database() -> None:
