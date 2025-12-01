@@ -243,5 +243,89 @@ def issue_certificate(username, csr_pem):
         
     return cert_pem
 
+def revoke_certificate(serial):
+    """
+    Revoca un certificado añadiéndolo a la CRL.
+    
+    Args:
+        serial (int): Número de serie del certificado a revocar.
+        
+    Returns:
+        bool: True si la revocación fue exitosa.
+    """
+    # Cargar CA Intermedia y su clave
+    try:
+        ca_cert = load_certificate("intermediate_ca.crt")
+        ca_key = load_private_key("intermediate_ca.key")
+    except FileNotFoundError:
+        raise Exception("Error: CA Intermedia no encontrada.")
+    
+    # Cargar CRL actual
+    crl_path = "intermediate_ca.crl"
+    try:
+        with open(crl_path, "rb") as f:
+            current_crl = x509.load_pem_x509_crl(f.read())
+    except FileNotFoundError:
+        # Si no existe CRL, crear una nueva vacía
+        current_crl = generate_crl(ca_cert, ca_key)
+    
+    # Crear nueva CRL con el certificado revocado añadido
+    builder = x509.CertificateRevocationListBuilder()
+    builder = builder.issuer_name(ca_cert.subject)
+    builder = builder.last_update(datetime.datetime.now(timezone.utc))
+    builder = builder.next_update(datetime.datetime.now(timezone.utc) + datetime.timedelta(days=1))
+    
+    # Añadir todos los certificados revocados existentes
+    for revoked_cert in current_crl:
+        builder = builder.add_revoked_certificate(revoked_cert)
+    
+    # Añadir el nuevo certificado revocado
+    revoked_cert = x509.RevokedCertificateBuilder().serial_number(
+        serial
+    ).revocation_date(
+        datetime.datetime.now(timezone.utc)
+    ).build()
+    
+    builder = builder.add_revoked_certificate(revoked_cert)
+    
+    # Firmar la CRL con la CA intermedia
+    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
+    
+    # Guardar la CRL actualizada
+    save_pem(new_crl, crl_path)
+    
+    print(f"Certificado con serial {serial} revocado exitosamente.")
+    return True
+
+def is_revoked(cert_pem):
+    """
+    Verifica si un certificado está revocado.
+    
+    Args:
+        cert_pem (bytes): Certificado en formato PEM.
+        
+    Returns:
+        bool: True si el certificado está revocado, False en caso contrario.
+    """
+    # Cargar CRL
+    crl_path = "intermediate_ca.crl"
+    try:
+        with open(crl_path, "rb") as f:
+            crl = x509.load_pem_x509_crl(f.read())
+    except FileNotFoundError:
+        # Si no existe CRL, ningún certificado está revocado
+        return False
+    
+    # Parsear el certificado
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem)
+    except Exception as e:
+        raise ValueError(f"Certificado PEM inválido: {e}")
+    
+    # Verificar si el número de serie está en la CRL
+    revoked = crl.get_revoked_certificate_by_serial_number(cert.serial_number)
+    
+    return revoked is not None
+
 if __name__ == "__main__":
     setup_pki()
