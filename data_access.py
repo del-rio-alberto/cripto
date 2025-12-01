@@ -28,10 +28,11 @@ def init_database():
             username TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             salt TEXT NOT NULL,
+            encrypted_private_key TEXT NOT NULL,
+            public_key_pem TEXT NOT NULL,
+            certificate_pem TEXT,
             encryption_key TEXT NOT NULL,
             hmac_key TEXT NOT NULL,
-            encrypted_private_key TEXT,
-            public_key TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -45,7 +46,7 @@ def init_database():
             ciphertext TEXT NOT NULL,
             nonce TEXT NOT NULL,
             tag TEXT NOT NULL,
-            hmac TEXT NOT NULL,
+            signature TEXT NOT NULL,
             timestamp TEXT NOT NULL,
             read INTEGER DEFAULT 0,
             FOREIGN KEY (username_from) REFERENCES users(username),
@@ -81,17 +82,17 @@ def get_db_connection():
     return conn
 
 
-def create_user(username: str, password_hash: str, salt: bytes, encryption_key: bytes) -> None:
+def create_user(username: str, password_hash: str, salt: bytes, encryption_key: bytes, encrypted_private_key: str, public_key_pem: str) -> None:
     """
-    Crea un nuevo usuario en la base de datos.
-    
-    MODIFICACIÓN: Ahora también genera y almacena una clave HMAC
+    Crea un nuevo usuario en la base de datos con todas sus claves.
     
     Args:
         username: Nombre del usuario
         password_hash: Hash de la contraseña (bcrypt)
         salt: Salt para derivación de clave
         encryption_key: Clave de cifrado AES derivada
+        encrypted_private_key: Clave privada cifrada (JSON)
+        public_key_pem: Clave pública (PEM)
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -105,9 +106,15 @@ def create_user(username: str, password_hash: str, salt: bytes, encryption_key: 
     hmac_key_b64 = base64.b64encode(hmac_key).decode('utf-8')
     
     cursor.execute('''
-        INSERT INTO users (username, password_hash, salt, encryption_key, hmac_key)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (username, password_hash, salt_b64, encryption_key_b64, hmac_key_b64))
+        INSERT INTO users (
+            username, password_hash, salt, encryption_key, hmac_key,
+            encrypted_private_key, public_key_pem
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        username, password_hash, salt_b64, encryption_key_b64, hmac_key_b64,
+        encrypted_private_key, public_key_pem
+    ))
     
     conn.commit()
     conn.close()
@@ -346,27 +353,7 @@ def mark_message_as_read(message_id: int) -> None:
     conn.close()
 
 
-def store_user_keypair(username: str, encrypted_private_key: str, public_key: str) -> None:
-    """
-    Almacena el par de claves cifrado de un usuario.
-    
-    Args:
-        username: Nombre del usuario
-        encrypted_private_key: Clave privada cifrada (JSON string)
-        public_key: Clave pública en formato PEM
-    """
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        UPDATE users 
-        SET encrypted_private_key = ?, public_key = ?
-        WHERE username = ?
-    ''', (encrypted_private_key, public_key, username))
-    
-    conn.commit()
-    conn.close()
-    logger.info(f"Keypair almacenado para usuario '{username}'")
+
 
 
 def get_user_encrypted_private_key(username: str) -> Optional[str]:

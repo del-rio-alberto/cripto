@@ -31,7 +31,8 @@ from data_access import (
     mark_message_as_read,
     store_message,
     reset_database,
-    store_user_keypair,
+    store_message,
+    reset_database,
     get_user_encrypted_private_key
 )
 from pki_helper import verify_signature, verify_certificate_chain
@@ -111,20 +112,17 @@ def register():
     # 3. Derivar clave de cifrado del usuario
     encryption_key = derive_key_from_password(password, salt)
 
-    # 4. Guardar en base de datos
-    create_user(username, password_hash, salt, encryption_key)
-
-    # 5. Generar par de claves EC P-256
+    # 4. Generar par de claves EC P-256
     private_key, public_key = generate_user_keypair()
     
-    # 6. Cifrar clave privada con la contraseña del usuario
+    # 5. Cifrar clave privada con la contraseña del usuario
     encrypted_private_key = encrypt_private_key(private_key, password)
     
-    # 7. Obtener clave pública en formato PEM
+    # 6. Obtener clave pública en formato PEM
     public_key_pem = get_public_key_pem(private_key)
-    
-    # 8. Guardar claves en la base de datos
-    store_user_keypair(username, encrypted_private_key, public_key_pem)
+
+    # 7. Guardar en base de datos (todo junto)
+    create_user(username, password_hash, salt, encryption_key, encrypted_private_key, public_key_pem)
 
     logger.info(f"Usuario '{username}' registrado exitosamente con keypair EC P-256")
 
