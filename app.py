@@ -30,9 +30,17 @@ from data_access import (
     get_user_messages,
     mark_message_as_read,
     store_message,
-    reset_database
+    reset_database,
+    store_user_keypair,
+    get_user_encrypted_private_key
 )
 from pki_helper import verify_signature, verify_certificate_chain
+from user_keys import (
+    generate_user_keypair,
+    encrypt_private_key,
+    decrypt_private_key,
+    get_public_key_pem
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -106,7 +114,19 @@ def register():
     # 4. Guardar en base de datos
     create_user(username, password_hash, salt, encryption_key)
 
-    logger.info(f"Usuario '{username}' registrado exitosamente")
+    # 5. Generar par de claves EC P-256
+    private_key, public_key = generate_user_keypair()
+    
+    # 6. Cifrar clave privada con la contraseña del usuario
+    encrypted_private_key = encrypt_private_key(private_key, password)
+    
+    # 7. Obtener clave pública en formato PEM
+    public_key_pem = get_public_key_pem(private_key)
+    
+    # 8. Guardar claves en la base de datos
+    store_user_keypair(username, encrypted_private_key, public_key_pem)
+
+    logger.info(f"Usuario '{username}' registrado exitosamente con keypair EC P-256")
 
     return jsonify({
         'success': True,
@@ -172,6 +192,18 @@ def login():
 
     # Generar token JWT
     token = generate_jwt(username)
+    
+    # Obtener y descifrar clave privada del usuario
+    encrypted_private_key_blob = get_user_encrypted_private_key(username)
+    
+    if encrypted_private_key_blob:
+        try:
+            # Descifrar la clave privada con la contraseña
+            private_key = decrypt_private_key(encrypted_private_key_blob, password)
+            logger.info(f"Clave privada descifrada exitosamente para '{username}'")
+        except ValueError as e:
+            logger.error(f"Error al descifrar clave privada para '{username}': {str(e)}")
+            # Continuar con el login aunque falle el descifrado de la clave
 
     logger.info(f"Login exitoso para usuario '{username}'")
 

@@ -30,6 +30,8 @@ def init_database():
             salt TEXT NOT NULL,
             encryption_key TEXT NOT NULL,
             hmac_key TEXT NOT NULL,
+            encrypted_private_key TEXT,
+            public_key TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
@@ -342,6 +344,75 @@ def mark_message_as_read(message_id: int) -> None:
 
     conn.commit()
     conn.close()
+
+
+def store_user_keypair(username: str, encrypted_private_key: str, public_key: str) -> None:
+    """
+    Almacena el par de claves cifrado de un usuario.
+    
+    Args:
+        username: Nombre del usuario
+        encrypted_private_key: Clave privada cifrada (JSON string)
+        public_key: Clave pública en formato PEM
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        UPDATE users 
+        SET encrypted_private_key = ?, public_key = ?
+        WHERE username = ?
+    ''', (encrypted_private_key, public_key, username))
+    
+    conn.commit()
+    conn.close()
+    logger.info(f"Keypair almacenado para usuario '{username}'")
+
+
+def get_user_encrypted_private_key(username: str) -> Optional[str]:
+    """
+    Obtiene la clave privada cifrada de un usuario.
+    
+    Args:
+        username: Nombre del usuario
+        
+    Returns:
+        Clave privada cifrada (JSON string) o None si no existe
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        'SELECT encrypted_private_key FROM users WHERE username = ?',
+        (username,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    
+    return row['encrypted_private_key'] if row else None
+
+
+def get_user_public_key(username: str) -> Optional[str]:
+    """
+    Obtiene la clave pública de un usuario.
+    
+    Args:
+        username: Nombre del usuario
+        
+    Returns:
+        Clave pública en formato PEM o None si no existe
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute(
+        'SELECT public_key FROM users WHERE username = ?',
+        (username,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    
+    return row['public_key'] if row else None
 
 
 def reset_database() -> None:
