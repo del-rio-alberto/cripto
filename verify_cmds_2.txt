@@ -1,5 +1,0 @@
-login alice 12345678
-send alice "Message to self"
-list
-read 1
-exit
