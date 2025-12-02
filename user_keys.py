@@ -12,6 +12,9 @@ import base64
 import json
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -212,3 +215,21 @@ def get_public_key_pem(private_key):
     public_key = private_key.public_key()
     public_key_pem = _serialize_public_key(public_key)
     return public_key_pem.decode('utf-8')
+
+
+def generate_csr(private_key, common_name):
+    """
+    Genera un CSR (Certificate Signing Request) para un usuario.
+    
+    Args:
+        private_key: Objeto de clave privada EC
+        common_name: Nombre común (CN) para el certificado (username)
+        
+    Returns:
+        bytes: CSR en formato PEM
+    """
+    csr = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+    ])).sign(private_key, hashes.SHA256())
+    
+    return csr.public_bytes(serialization.Encoding.PEM)

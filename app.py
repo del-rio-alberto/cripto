@@ -537,6 +537,75 @@ def send_message():
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
+@app.route('/messages/secure', methods=['POST'])
+def send_secure_message_endpoint():
+    """
+    Envía un mensaje PRE-CIFRADO (Client-Side) a otro usuario.
+    
+    Headers:
+        Authorization: Bearer <token_jwt>
+    
+    Body JSON:
+        {
+            "to": "username_destinatario",
+            "ciphertext": "base64...",
+            "nonce": "base64...",
+            "signature": "base64...",
+            "cert_emisor": "pem_string...",
+            "ephemeral_pubkey": "pem_string..."
+        }
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+        
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username_from = payload['username']
+        
+        # Obtener datos
+        data = request.get_json()
+        username_to = data.get('to')
+        ciphertext = data.get('ciphertext')
+        nonce = data.get('nonce')
+        signature = data.get('signature')
+        cert_emisor = data.get('cert_emisor')
+        ephemeral_pubkey = data.get('ephemeral_pubkey')
+        
+        if not all([username_to, ciphertext, nonce, signature, cert_emisor, ephemeral_pubkey]):
+            return jsonify({'error': 'Faltan campos obligatorios para mensaje seguro'}), 400
+            
+        if not user_exists(username_to):
+            return jsonify({'error': 'Usuario destinatario no encontrado'}), 404
+            
+        # Guardar en base de datos
+        timestamp = datetime.now().isoformat()
+        message_id = store_message(
+            username_from=username_from,
+            username_to=username_to,
+            ciphertext=ciphertext,
+            nonce=nonce,
+            signature=signature,
+            cert_emisor=cert_emisor,
+            ephemeral_pubkey=ephemeral_pubkey,
+            timestamp=timestamp
+        )
+        
+        logger.info(f"Mensaje seguro (Client-Side) enviado: {username_from} -> {username_to} (ID: {message_id})")
+        
+        return jsonify({
+            'success': True,
+            'message_id': message_id,
+            'timestamp': timestamp
+        }), 201
+        
+    except Exception as e:
+        logger.error(f"Error al enviar mensaje seguro: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+
 
 @app.route('/messages', methods=['GET'])
 def get_messages():
@@ -758,6 +827,44 @@ def read_message(message_id):
         return jsonify({'error': str(e)}), 401
     except Exception as e:
         logger.error(f"Error al leer mensaje: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
+
+
+@app.route('/messages/<int:message_id>/raw', methods=['GET'])
+def get_message_raw(message_id):
+    """
+    Obtiene el mensaje cifrado RAW para descifrado en cliente.
+    """
+    try:
+        # Verificar token JWT
+        auth_header = request.headers.get('Authorization')
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({'error': 'Token no proporcionado'}), 401
+        
+        token = auth_header.split(' ')[1]
+        payload = verify_jwt(token)
+        username = payload['username']
+        
+        # Obtener mensaje
+        message_data = get_message_by_id(message_id)
+        if not message_data:
+            return jsonify({'error': 'Mensaje no encontrado'}), 404
+            
+        # Verificar propiedad (to o from)
+        if message_data['username_to'] != username and message_data['username_from'] != username:
+            return jsonify({'error': 'No autorizado'}), 403
+            
+        # Marcar como leído si es el destinatario
+        if message_data['username_to'] == username:
+            mark_message_as_read(message_id)
+            
+        return jsonify({
+            'success': True,
+            'message': message_data
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error al obtener mensaje raw: {str(e)}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
@@ -1173,6 +1280,45 @@ def cert_revoke():
     except Exception as e:
         logger.error(f"Error al revocar certificado: {str(e)}")
         return jsonify({'error': f'Error al revocar certificado: {str(e)}'}), 500
+
+
+@app.route('/cert/<username>', methods=['GET'])
+def get_user_cert(username):
+    """
+    Obtiene el certificado público de un usuario.
+    
+    Respuesta exitosa (200):
+        {
+            "success": true,
+            "username": "nombre_usuario",
+            "certificate_pem": "base64_del_certificado"
+        }
+    
+    Errores:
+        - 404: Certificado no encontrado
+        - 500: Error interno
+    """
+    try:
+        cert_pem = get_user_certificate(username)
+        if not cert_pem:
+            return jsonify({'error': f'Certificado no encontrado para {username}'}), 404
+            
+        # Si get_user_certificate devuelve bytes, decodificar
+        if isinstance(cert_pem, bytes):
+            cert_pem = cert_pem.decode('utf-8')
+            
+        # Codificar a base64 para transporte seguro en JSON
+        cert_pem_b64 = base64.b64encode(cert_pem.encode('utf-8')).decode('utf-8')
+        
+        return jsonify({
+            'success': True,
+            'username': username,
+            'certificate_pem': cert_pem_b64
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error al obtener certificado de {username}: {str(e)}")
+        return jsonify({'error': 'Error interno del servidor'}), 500
 
 
 @app.route('/cert/crl', methods=['GET'])
