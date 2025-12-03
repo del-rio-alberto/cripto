@@ -1,5 +1,4 @@
 import os
-import base64
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -7,7 +6,6 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from hybrid_encryption import derive_shared_key, encrypt_message, decrypt_message
 from digital_signature import sign_message, verify_message_signature
 from user_keys import generate_user_keypair, _serialize_public_key
-from pki_helper import verify_certificate_chain
 
 def send_secure_message(sender, receiver, message_text):
     """

@@ -10,7 +10,7 @@ if [ ! -f pki/root/serial ]; then
 fi
 
 echo "Generating Root CA private key..."
-openssl genrsa -aes256 -out pki/root/private/root.key.pem 4096
+openssl genrsa -out pki/root/private/root.key.pem 4096
 
 echo "Generating Root CA certificate..."
 openssl req -config pki/ca-root.cnf \

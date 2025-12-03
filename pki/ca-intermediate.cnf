@@ -3,11 +3,12 @@ default_ca = CA_default
 
 [ CA_default ]
 dir               = ./pki/intermediate
-certs             = $dir
-crl_dir           = $dir
-new_certs_dir     = $dir
+certs             = $dir/certs
+crl_dir           = $dir/crl
+new_certs_dir     = $dir/newcerts
 database          = $dir/index.txt
 serial            = $dir/serial
+crlnumber         = $dir/crlnumber
 RANDFILE          = $dir/private/.rand
 
 private_key       = $dir/intermediate.key
@@ -16,7 +17,8 @@ certificate       = $dir/intermediate.crt
 default_md        = sha256
 name_opt          = ca_default
 cert_opt          = ca_default
-default_days      = 1825
+default_days      = 375
+default_crl_days  = 30
 preserve          = no
 policy            = policy_loose
 
@@ -30,23 +32,31 @@ commonName              = supplied
 emailAddress            = optional
 
 [ req ]
-default_bits        = 2048
+default_bits        = 4096
 distinguished_name  = req_distinguished_name
 string_mask         = utf8only
 default_md          = sha256
 x509_extensions     = v3_intermediate_ca
+prompt              = no
 
 [ req_distinguished_name ]
-countryName                     = Country Name (2 letter code)
-stateOrProvinceName             = State or Province Name
-localityName                    = Locality Name
-0.organizationName              = Organization Name
-organizationalUnitName          = Organizational Unit Name
-commonName                      = Common Name
-emailAddress                    = Email Address
+countryName                  = ES
+stateOrProvinceName          = Madrid
+localityName                 = Madrid
+organizationName             = MyOrganization
+commonName                   = Intermediate CA
 
 [ v3_intermediate_ca ]
 subjectKeyIdentifier = hash
 authorityKeyIdentifier = keyid:always,issuer
 basicConstraints = critical, CA:TRUE, pathlen:0
 keyUsage = critical, digitalSignature, cRLSign, keyCertSign
+
+[ usr_cert ]
+basicConstraints = CA:FALSE
+nsCertType = client, email
+nsComment = "OpenSSL Generated Client Certificate"
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
+extendedKeyUsage = clientAuth, emailProtection

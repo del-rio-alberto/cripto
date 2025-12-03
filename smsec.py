@@ -3,6 +3,7 @@ import requests
 import os
 import getpass
 import base64
+import shlex
 
 from user_keys import generate_user_keypair, encrypt_private_key, decrypt_private_key, get_public_key_pem, generate_csr
 from secure_messaging import send_secure_message, receive_secure_message
@@ -212,7 +213,6 @@ class SMSecShell(cmd.Cmd):
     def do_send(self, arg):
         """Envía un mensaje seguro: send <emisor> <destinatario> <mensaje>"""
         # Parsear argumentos respetando comillas
-        import shlex
         try:
             args = shlex.split(arg)
         except ValueError:
@@ -407,6 +407,110 @@ class SMSecShell(cmd.Cmd):
             
         except Exception as e:
             print(f"Error al descifrar/verificar mensaje: {e}")
+
+    def do_setup(self, arg):
+        """Configura un nuevo usuario completamente: setup <username>"""
+        if not arg:
+            print("Uso: setup <username>")
+            return
+        
+        username = arg
+        password = getpass.getpass(f"Introduce contraseña para {username}: ")
+        
+        print(f"\n=== Configurando usuario '{username}' ===")
+        
+        # 1. Generar claves
+        print("1/5 Generando par de claves...")
+        try:
+            private_key, public_key = generate_user_keypair()
+            encrypted_private_key = encrypt_private_key(private_key, password)
+            
+            with open(self._get_private_key_path(username), 'w') as f:
+                f.write(encrypted_private_key)
+            
+            public_key_pem = get_public_key_pem(private_key)
+            with open(self._get_public_key_path(username), 'w') as f:
+                f.write(public_key_pem)
+            
+            print(f"Claves generadas")
+        except Exception as e:
+            print(f"Error: {e}")
+            return
+        
+        # 2. Generar CSR
+        print("2/5 Generando CSR...")
+        try:
+            csr_pem = generate_csr(private_key, username)
+            with open(self._get_csr_path(username), 'wb') as f:
+                f.write(csr_pem)
+            print(f"CSR generado")
+        except Exception as e:
+            print(f"Error: {e}")
+            return
+        
+        # 3. Registrar en servidor
+        print("3/5 Registrando usuario en servidor...")
+        try:
+            response = requests.post(f'{self.base_url}/register', json={
+                'username': username,
+                'password': password
+            })
+            if response.status_code == 201:
+                print(f"Usuario registrado")
+            else:
+                print(f"Error: {response.json().get('error')}")
+                return
+        except Exception as e:
+            print(f"Error de conexión: {e}")
+            return
+        
+        # 4. Obtener certificado
+        print("4/5 Solicitando certificado...")
+        try:
+            with open(self._get_csr_path(username), 'rb') as f:
+                csr_pem = f.read()
+            
+            csr_b64 = base64.b64encode(csr_pem).decode('utf-8')
+            response = requests.post(f'{self.base_url}/cert/issue', json={
+                'username': username,
+                'csr_pem': csr_b64
+            })
+            
+            if response.status_code == 200:
+                data = response.json()
+                cert_pem_b64 = data['certificate_pem']
+                cert_pem = base64.b64decode(cert_pem_b64)
+                
+                with open(self._get_cert_path(username), 'wb') as f:
+                    f.write(cert_pem)
+                print(f"Certificado obtenido")
+            else:
+                print(f"Error: {response.json().get('error')}")
+                return
+        except Exception as e:
+            print(f"Error: {e}")
+            return
+        
+        # 5. Login automático
+        print("5/5 Iniciando sesión...")
+        try:
+            response = requests.post(f'{self.base_url}/login', json={
+                'username': username,
+                'password': password
+            })
+            if response.status_code == 200:
+                data = response.json()
+                self.token = data['token']
+                self.username = data['username']
+                self.prompt = f'({self.username}) '
+                print(f"Sesión iniciada")
+            else:
+                print(f"Error: {response.json().get('error')}")
+        except Exception as e:
+            print(f"Error: {e}")
+        
+        print(f"\n=== Usuario '{username}' configurado correctamente ===\n")
+
 
     def do_reset(self, arg):
         """Resetea la base de datos: reset"""
