@@ -165,42 +165,21 @@ def receive_secure_message(receiver, payload_dict):
         raise ValueError(f"Payload incompleto, falta: {e}")
 
     # 1. Verificar certificado del emisor
-    # Cargar artefactos PKI (Root CA, Intermediate CA, CRL)
-    root_pem = None
-    inter_pem = None
-    crl_pem = None
-    
-    # Rutas posibles
-    possible_roots = ["root_ca.crt", "pki/root/certs/root.cert.pem"]
-    possible_inters = ["intermediate_ca.crt", "pki/intermediate/intermediate.crt"]
-    possible_crls = ["intermediate_ca.crl", "pki/intermediate/crl.pem"]
-    
-    for p in possible_roots:
-        if os.path.exists(p):
-            root_pem = _load_file(p)
-            break
-            
-    for p in possible_inters:
-        if os.path.exists(p):
-            inter_pem = _load_file(p)
-            break
-            
-    for p in possible_crls:
-        if os.path.exists(p):
-            crl_pem = _load_file(p)
-            break
-            
-    if not root_pem or not inter_pem:
-        raise ValueError("No se encontraron los certificados de CA (Root/Intermediate) en el sistema")
-        
-    if not crl_pem:
-        raise ValueError("No se encontró la CRL en el sistema")
-        
-    # Validar cadena
-    sender_cert_bytes = sender_cert_pem.encode('utf-8') if isinstance(sender_cert_pem, str) else sender_cert_pem
-    
-    if not verify_certificate_chain(sender_cert_bytes, inter_pem, root_pem, crl_pem):
-        raise ValueError("Validación de certificado del emisor fallida (Cadena o CRL inválidos)")
+    root_path = "pki/root/certs/root.cert.pem"
+    inter_path = "pki/intermediate/intermediate.crt"
+    crl_path = "pki/intermediate/crl.pem"
+
+    if not os.path.exists(root_path) or not os.path.exists(inter_path):
+        raise ValueError(
+            "No se encontraron los certificados de CA (Root/Intermediate) en las rutas OpenSSL "
+            "esperadas (pki/root/certs/root.cert.pem, pki/intermediate/intermediate.crt)"
+        )
+
+    if not os.path.exists(crl_path):
+        raise ValueError(
+            "No se encontró la CRL en la ruta OpenSSL esperada (pki/intermediate/crl.pem). "
+            "Genera la CRL con 'openssl ca -config pki/ca-intermediate.cnf -gencrl -out pki/intermediate/crl.pem'."
+        )
         
     # 2. Obtener clave privada del receptor
     receiver_private_key = None

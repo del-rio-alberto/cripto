@@ -2,15 +2,10 @@ import cmd
 import requests
 import os
 import getpass
-import json
 import base64
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
 
 from user_keys import generate_user_keypair, encrypt_private_key, decrypt_private_key, get_public_key_pem, generate_csr
-from digital_signature import sign_message
 from secure_messaging import send_secure_message, receive_secure_message
-from pki import issue_certificate
 
 class SMSecShell(cmd.Cmd):
     intro = 'Bienvenido al cliente SMSec. Escribe help o ? para listar los comandos.\n'
@@ -214,59 +209,6 @@ class SMSecShell(cmd.Cmd):
         except requests.exceptions.RequestException as e:
             print(f"Error de conexión: {e}")
 
-    def do_encrypt(self, arg):
-        """Cifra un mensaje: encrypt <texto>"""
-        if not self.token:
-            print("Debes iniciar sesión primero.")
-            return
-        
-        if not arg:
-            print("Uso: encrypt <texto>")
-            return
-
-        try:
-            headers = {'Authorization': f'Bearer {self.token}'}
-            response = requests.post(f'{self.base_url}/encrypt', json={'plaintext': arg}, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                print("Cifrado exitoso:")
-                print(f"Ciphertext: {data['ciphertext']}")
-                print(f"Nonce: {data['nonce']}")
-                print(f"Tag: {data['tag']}")
-            else:
-                print(f"Error: {response.json().get('error', 'Error desconocido')}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error de conexión: {e}")
-
-    def do_decrypt(self, arg):
-        """Descifra un mensaje: decrypt <ciphertext> <nonce> <tag>"""
-        if not self.token:
-            print("Debes iniciar sesión primero.")
-            return
-        
-        args = arg.split()
-        if len(args) != 3:
-            print("Uso: decrypt <ciphertext> <nonce> <tag>")
-            return
-        
-        ciphertext, nonce, tag = args
-        try:
-            headers = {'Authorization': f'Bearer {self.token}'}
-            response = requests.post(f'{self.base_url}/decrypt', json={
-                'ciphertext': ciphertext,
-                'nonce': nonce,
-                'tag': tag
-            }, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                print(f"Texto descifrado: {data['plaintext']}")
-            else:
-                print(f"Error: {response.json().get('error', 'Error desconocido')}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error de conexión: {e}")
-
     def do_send(self, arg):
         """Envía un mensaje seguro: send <emisor> <destinatario> <mensaje>"""
         # Parsear argumentos respetando comillas
@@ -465,55 +407,6 @@ class SMSecShell(cmd.Cmd):
             
         except Exception as e:
             print(f"Error al descifrar/verificar mensaje: {e}")
-
-    def do_hmac_gen(self, arg):
-        """Genera HMAC: hmac_gen <mensaje>"""
-        if not self.token:
-            print("Debes iniciar sesión primero.")
-            return
-        
-        if not arg:
-            print("Uso: hmac_gen <mensaje>")
-            return
-            
-        try:
-            headers = {'Authorization': f'Bearer {self.token}'}
-            response = requests.post(f'{self.base_url}/hmac/generate', json={'message': arg}, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                print(f"HMAC: {data['hmac']}")
-            else:
-                print(f"Error: {response.json().get('error', 'Error desconocido')}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error de conexión: {e}")
-
-    def do_hmac_verify(self, arg):
-        """Verifica HMAC: hmac_verify <mensaje> <hmac>"""
-        if not self.token:
-            print("Debes iniciar sesión primero.")
-            return
-        
-        args = arg.rsplit(' ', 1) # Split desde la derecha para manejar espacios en el mensaje
-        if len(args) != 2:
-            print("Uso: hmac_verify <mensaje> <hmac>")
-            return
-            
-        message, hmac_val = args
-        try:
-            headers = {'Authorization': f'Bearer {self.token}'}
-            response = requests.post(f'{self.base_url}/hmac/verify', json={
-                'message': message,
-                'hmac': hmac_val
-            }, headers=headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                print(f"Resultado: {data['message']}")
-            else:
-                print(f"Error: {response.json().get('error', 'Error desconocido')}")
-        except requests.exceptions.RequestException as e:
-            print(f"Error de conexión: {e}")
 
     def do_reset(self, arg):
         """Resetea la base de datos: reset"""

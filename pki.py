@@ -2,330 +2,236 @@
 import datetime
 from datetime import timezone
 import os
+import subprocess
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa, ec
+from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-def generate_private_key(key_size=4096):
-    """Genera una clave privada RSA."""
-    return rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=key_size,
-    )
 
-def generate_root_ca(private_key, common_name="Root CA"):
-    """Genera un certificado autofirmado para la CA Raíz."""
-    subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"ES"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Madrid"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, u"Madrid"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Mi Organizacion"),
-        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-    ])
-    
-    cert = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        issuer
-    ).public_key(
-        private_key.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.datetime.now(timezone.utc)
-    ).not_valid_after(
-        datetime.datetime.now(timezone.utc) + datetime.timedelta(days=3650) # 10 años
-    ).add_extension(
-        x509.BasicConstraints(ca=True, path_length=None), critical=True,
-    ).sign(private_key, hashes.SHA256())
-    
-    return cert
 
-def generate_csr(private_key, common_name):
-    """Genera una Solicitud de Firma de Certificado (CSR)."""
-    csr = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"ES"),
-        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Madrid"),
-        x509.NameAttribute(NameOID.LOCALITY_NAME, u"Madrid"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Mi Organizacion"),
-        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
-    ])).add_extension(
-        x509.BasicConstraints(ca=True, path_length=0), critical=True,
-    ).sign(private_key, hashes.SHA256())
-    
-    return csr
-
-def sign_csr(csr, ca_cert, ca_key, ca_is_root=False):
-    """Firma un CSR con la clave de una CA."""
-    builder = x509.CertificateBuilder().subject_name(
-        csr.subject
-    ).issuer_name(
-        ca_cert.subject
-    ).public_key(
-        csr.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.datetime.now(timezone.utc)
-    ).not_valid_after(
-        datetime.datetime.now(timezone.utc) + datetime.timedelta(days=3650) # 10 años
-    )
-    
-    for extension in csr.extensions:
-        builder = builder.add_extension(extension.value, extension.critical)
-        
-    cert = builder.sign(ca_key, hashes.SHA256())
-    return cert
-
-def generate_crl(ca_cert, ca_key):
-    """Genera una Lista de Revocación de Certificados (CRL) vacía."""
-    builder = x509.CertificateRevocationListBuilder()
-    builder = builder.issuer_name(ca_cert.subject)
-    builder = builder.last_update(datetime.datetime.now(timezone.utc))
-    builder = builder.next_update(datetime.datetime.now(timezone.utc) + datetime.timedelta(days=1))
-    
-    crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
-    return crl
-
-def save_pem(data, filename):
-    """Guarda datos (clave, cert, csr, crl) en un archivo PEM."""
-    with open(filename, "wb") as f:
-        if isinstance(data, (x509.Certificate, x509.CertificateSigningRequest, x509.CertificateRevocationList)):
-            f.write(data.public_bytes(serialization.Encoding.PEM))
-        elif isinstance(data, rsa.RSAPrivateKey):
-            f.write(data.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption()
-            ))
-
-def load_private_key(filename):
-    """Carga una clave privada desde un archivo PEM."""
-    with open(filename, "rb") as f:
-        return serialization.load_pem_private_key(
-            f.read(),
-            password=None
-        )
 
 def load_certificate(filename):
     """Carga un certificado desde un archivo PEM."""
     with open(filename, "rb") as f:
         return x509.load_pem_x509_certificate(f.read())
 
-def setup_pki():
-    """Orquesta el flujo completo de generación."""
-    print("Generando CA Raíz...")
-    root_key = generate_private_key()
-    root_cert = generate_root_ca(root_key, "Root CA")
-    save_pem(root_key, "root_ca.key")
-    save_pem(root_cert, "root_ca.crt")
-    
-    print("Generando CA Intermedia...")
-    inter_key = generate_private_key()
-    inter_csr = generate_csr(inter_key, "Intermediate CA")
-    save_pem(inter_key, "intermediate_ca.key")
-    save_pem(inter_csr, "intermediate_ca.csr")
-    
-    print("Firmando CA Intermedia...")
-    inter_cert = sign_csr(inter_csr, root_cert, root_key)
-    save_pem(inter_cert, "intermediate_ca.crt")
-    
-    print("Generando CRL para CA Intermedia...")
-    crl = generate_crl(inter_cert, inter_key)
-    save_pem(crl, "intermediate_ca.crl")
-    
-    print("Configuración PKI completada.")
+
+def generate_csr(private_key, common_name):
+    """
+    Genera una CSR para un usuario.
+    """
+    csr = x509.CertificateSigningRequestBuilder().subject_name(x509.Name([
+        x509.NameAttribute(NameOID.COUNTRY_NAME, u"ES"),
+        x509.NameAttribute(NameOID.STATE_OR_PROVINCE_NAME, u"Madrid"),
+        x509.NameAttribute(NameOID.LOCALITY_NAME, u"Madrid"),
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Mi Organizacion"),
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+    ])).sign(private_key, hashes.SHA256())
+    return csr
 
 def issue_certificate(username, csr_pem):
     """
-    Emite un certificado para un usuario basado en un CSR.
-    
+    Emite un certificado de usuario delegando TODA la lógica en OpenSSL (`openssl ca`).
+
+    - Usa la CA intermedia definida en `pki/ca-intermediate.cnf`.
+    - Registra el certificado en la base de datos OpenSSL (pki/intermediate/index.txt).
+    - Genera el fichero de salida `certs/<username>.crt`.
+
     Args:
-        username (str): Nombre del usuario (se usará como CN).
-        csr_pem (bytes): Contenido del CSR en formato PEM.
-        
+        username (str): Nombre de usuario (se usa solo para el nombre del fichero).
+        csr_pem (bytes): CSR en formato PEM.
+
     Returns:
         bytes: Certificado emitido en formato PEM.
     """
-    # Cargar CA Intermedia y su clave
+    # Verificar que la PKI OpenSSL existe
+    inter_key_path = "pki/intermediate/intermediate.key"
+    inter_cert_path = "pki/intermediate/intermediate.crt"
+    inter_conf_path = "pki/ca-intermediate.cnf"
+
+    for path in [inter_key_path, inter_cert_path, inter_conf_path]:
+        if not os.path.exists(path):
+            raise RuntimeError(
+                f"Infraestructura PKI incompleta. Falta '{path}'. "
+                "Inicializa la PKI ejecutando los scripts OpenSSL (create_root_ca.sh, create_intermediate_ca.sh)."
+            )
+
+    # Guardar CSR temporalmente en pki/users/
+    os.makedirs("pki/users", exist_ok=True)
+    csr_path = os.path.join("pki", "users", f"{username}.csr.pem")
+    with open(csr_path, "wb") as f:
+        f.write(csr_pem)
+
+    # Asegurar directorio de certificados de aplicación
+    os.makedirs("certs", exist_ok=True)
+    cert_path = os.path.join("certs", f"{username}.crt")
+
+    # Invocar OpenSSL CA intermedia
+    # Nota: la configuración de extensiones, días de validez, etc. se controla desde ca-intermediate.cnf
+    cmd = [
+        "openssl", "ca",
+        "-config", inter_conf_path,
+        "-in", csr_path,
+        "-out", cert_path,
+        "-batch",
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    if result.returncode != 0:
+        error_msg = result.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Error al emitir certificado con OpenSSL: {error_msg}")
+
+    # Leer certificado emitido
+    with open(cert_path, "rb") as f:
+        cert_pem = f.read()
+
+    # Registrar en log propio de la app (además del índice OpenSSL)
     try:
-        ca_cert = load_certificate("intermediate_ca.crt")
-        ca_key = load_private_key("intermediate_ca.key")
-    except FileNotFoundError:
-        raise Exception("Error: CA Intermedia no encontrada. Ejecuta setup_pki() primero.")
+        cert = x509.load_pem_x509_certificate(cert_pem)
+        serial_number = cert.serial_number
+    except Exception:
+        serial_number = "UNKNOWN"
 
-    # Cargar CSR
-    try:
-        csr = x509.load_pem_x509_csr(csr_pem)
-    except Exception as e:
-        raise ValueError(f"CSR inválido: {e}")
-
-    # Validar firma del CSR
-    if not csr.is_signature_valid:
-        raise ValueError("Firma del CSR inválida.")
-
-    # Validar que la clave pública sea EC P-256
-    public_key = csr.public_key()
-    if not isinstance(public_key, ec.EllipticCurvePublicKey):
-        raise ValueError("La clave pública debe ser de Curva Elíptica.")
-    if not isinstance(public_key.curve, ec.SECP256R1):
-        raise ValueError("La curva debe ser SECP256R1 (P-256).")
-
-    # Construir el certificado
-    # Forzamos el CN al username proporcionado para seguridad
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COUNTRY_NAME, u"ES"),
-        x509.NameAttribute(NameOID.ORGANIZATION_NAME, u"Mi Organizacion"),
-        x509.NameAttribute(NameOID.COMMON_NAME, username),
-    ])
-
-    builder = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        ca_cert.subject
-    ).public_key(
-        public_key
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.datetime.now(timezone.utc)
-    ).not_valid_after(
-        datetime.datetime.now(timezone.utc) + datetime.timedelta(days=365) # 1 año
-    )
-
-    # Añadir extensiones
-    # Basic Constraints: CA=False
-    builder = builder.add_extension(
-        x509.BasicConstraints(ca=False, path_length=None), critical=True,
-    )
-    
-    # Key Usage: digitalSignature, keyEncipherment
-    builder = builder.add_extension(
-        x509.KeyUsage(
-            digital_signature=True,
-            content_commitment=False,
-            key_encipherment=True,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=False,
-            crl_sign=False,
-            encipher_only=False,
-            decipher_only=False
-        ),
-        critical=True
-    )
-
-    # Extended Key Usage: clientAuth
-    builder = builder.add_extension(
-        x509.ExtendedKeyUsage([x509.ExtendedKeyUsageOID.CLIENT_AUTH]),
-        critical=False
-    )
-
-    # Firmar el certificado
-    cert = builder.sign(ca_key, hashes.SHA256())
-    
-    # Guardar certificado
-    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-    
-    # Asegurar directorio certs
-    if not os.path.exists("certs"):
-        os.makedirs("certs")
-        
-    cert_filename = f"certs/{username}.crt"
-    with open(cert_filename, "wb") as f:
-        f.write(cert_pem)
-        
-    # Registrar en log
     with open("issued_certs.log", "a") as log:
-        log.write(f"{cert.serial_number},{datetime.datetime.now(timezone.utc).isoformat()},{username},Valid\n")
-        
+        log.write(
+            f"{serial_number},{datetime.datetime.now(timezone.utc).isoformat()},{username},Valid\n"
+        )
+
     return cert_pem
 
 def revoke_certificate(serial):
     """
-    Revoca un certificado añadiéndolo a la CRL.
-    
+    Revoca un certificado usando exclusivamente OpenSSL:
+
+    - Llama a `openssl ca -revoke` con la CA intermedia.
+    - Regenera la CRL oficial con `openssl ca -gencrl` en `pki/intermediate/crl.pem`.
+
     Args:
         serial (int): Número de serie del certificado a revocar.
-        
+
     Returns:
         bool: True si la revocación fue exitosa.
     """
-    # Cargar CA Intermedia y su clave
-    try:
-        ca_cert = load_certificate("intermediate_ca.crt")
-        ca_key = load_private_key("intermediate_ca.key")
-    except FileNotFoundError:
-        raise Exception("Error: CA Intermedia no encontrada.")
-    
-    # Cargar CRL actual
-    crl_path = "intermediate_ca.crl"
-    try:
-        with open(crl_path, "rb") as f:
-            current_crl = x509.load_pem_x509_crl(f.read())
-    except FileNotFoundError:
-        # Si no existe CRL, crear una nueva vacía
-        current_crl = generate_crl(ca_cert, ca_key)
-    
-    # Crear nueva CRL con el certificado revocado añadido
-    builder = x509.CertificateRevocationListBuilder()
-    builder = builder.issuer_name(ca_cert.subject)
-    builder = builder.last_update(datetime.datetime.now(timezone.utc))
-    builder = builder.next_update(datetime.datetime.now(timezone.utc) + datetime.timedelta(days=1))
-    
-    # Añadir todos los certificados revocados existentes
-    for revoked_cert in current_crl:
-        builder = builder.add_revoked_certificate(revoked_cert)
-    
-    # Añadir el nuevo certificado revocado
-    revoked_cert = x509.RevokedCertificateBuilder().serial_number(
-        serial
-    ).revocation_date(
-        datetime.datetime.now(timezone.utc)
-    ).build()
-    
-    builder = builder.add_revoked_certificate(revoked_cert)
-    
-    # Firmar la CRL con la CA intermedia
-    new_crl = builder.sign(private_key=ca_key, algorithm=hashes.SHA256())
-    
-    # Guardar la CRL actualizada
-    save_pem(new_crl, crl_path)
-    
-    print(f"Certificado con serial {serial} revocado exitosamente.")
+    inter_conf_path = "pki/ca-intermediate.cnf"
+    crl_path = "pki/intermediate/crl.pem"
+
+    if not os.path.exists(inter_conf_path):
+        raise RuntimeError(
+            "No se encontró la configuración de la CA intermedia (pki/ca-intermediate.cnf). "
+            "Asegúrate de inicializar la PKI con los scripts OpenSSL."
+        )
+
+    # Buscar el certificado en el directorio certs/ por su número de serie
+    cert_path = None
+    if os.path.isdir("certs"):
+        for filename in os.listdir("certs"):
+            if not filename.endswith(".crt"):
+                continue
+            full_path = os.path.join("certs", filename)
+            try:
+                cert = load_certificate(full_path)
+                if cert.serial_number == serial:
+                    cert_path = full_path
+                    break
+            except Exception:
+                continue
+
+    if cert_path is None:
+        raise ValueError(f"No se encontró ningún certificado en 'certs/' con el número de serie {serial}")
+
+    # 1) Revocar en la base de datos OpenSSL
+    cmd_revoke = [
+        "openssl", "ca",
+        "-config", inter_conf_path,
+        "-revoke", cert_path,
+        "-batch",
+    ]
+    result_revoke = subprocess.run(
+        cmd_revoke,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result_revoke.returncode != 0:
+        error_msg = result_revoke.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Error al revocar certificado con OpenSSL: {error_msg}")
+
+    # 2) Regenerar CRL oficial
+    cmd_crl = [
+        "openssl", "ca",
+        "-config", inter_conf_path,
+        "-gencrl",
+        "-out", crl_path,
+        "-batch",
+    ]
+    result_crl = subprocess.run(
+        cmd_crl,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result_crl.returncode != 0:
+        error_msg = result_crl.stderr.decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Error al generar CRL con OpenSSL: {error_msg}")
+
+    # Actualizar log de la aplicación (si existe el serial)
+    if os.path.exists("issued_certs.log"):
+        lines = []
+        with open("issued_certs.log", "r") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if not parts:
+                    continue
+                if str(parts[0]) == str(serial):
+                    # Marcar como Revoked
+                    if len(parts) >= 4:
+                        parts[3] = "Revoked"
+                        line = ",".join(parts) + "\n"
+                lines.append(line)
+        with open("issued_certs.log", "w") as f:
+            f.writelines(lines)
+
+    print(f"Certificado con serial {serial} revocado exitosamente (OpenSSL CA).")
     return True
 
 def is_revoked(cert_pem):
     """
-    Verifica si un certificado está revocado.
-    
+    Verifica si un certificado está revocado usando EXCLUSIVAMENTE la CRL OpenSSL.
+
     Args:
         cert_pem (bytes): Certificado en formato PEM.
-        
+
     Returns:
         bool: True si el certificado está revocado, False en caso contrario.
     """
-    # Cargar CRL
-    crl_path = "intermediate_ca.crl"
+    crl_path = "pki/intermediate/crl.pem"
+
     try:
         with open(crl_path, "rb") as f:
             crl = x509.load_pem_x509_crl(f.read())
     except FileNotFoundError:
-        # Si no existe CRL, ningún certificado está revocado
+        # Si no existe la CRL oficial, asumimos que no hay certificados revocados todavía
         return False
-    
+
     # Parsear el certificado
     try:
         cert = x509.load_pem_x509_certificate(cert_pem)
     except Exception as e:
         raise ValueError(f"Certificado PEM inválido: {e}")
-    
+
     # Verificar si el número de serie está en la CRL
     revoked = crl.get_revoked_certificate_by_serial_number(cert.serial_number)
-    
     return revoked is not None
 
+
 if __name__ == "__main__":
-    setup_pki()
+    raise SystemExit(
+        "Este módulo ya no inicializa la PKI.\n"
+        "Usa los scripts OpenSSL 'create_root_ca.sh' y 'create_intermediate_ca.sh' "
+        "para crear la PKI en pki/root y pki/intermediate."
+    )

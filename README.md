@@ -17,16 +17,20 @@ Pasos para ejecutarlo:
 ```curl http://localhost:5000/```
 
 
-# PK
+# CLI
+```
+genkey <usuario>
+csr <usuario>
+getcert <usuario>
 
-1. Generar PKI
+register <usuario>
+login <usuario> <password>
 
-```venv/bin/python pki.py```
+send <emisor> <destinatario> "<mensaje>"
 
-2. Verificar PKI
+inbox
+read <message_id>
 
-```venv/bin/python test_pki.py```
-
-3. Verificar 
-
-```openssl verify -CAfile pki/root/root.crt pki/intermediate/intermediate.crt```
+reset
+exit
+```

@@ -1,9 +1,7 @@
 import sqlite3
 import base64
 import logging
-from datetime import datetime
-from typing import Optional, Dict, List
-from utils import generate_hmac_key
+from typing import Optional, Dict
 
 logger = logging.getLogger(__name__)
 

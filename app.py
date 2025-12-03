@@ -5,14 +5,6 @@ import os
 from datetime import datetime
 from flasgger import Swagger
 from dotenv import load_dotenv
-from cryptography import x509
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-
-from pki_helper import (
-    verify_signature,
-    verify_certificate_chain
-)
 
 from pki import (
     issue_certificate,
@@ -31,9 +23,7 @@ from data_access import (
     get_message_by_id,
     mark_message_as_read,
     get_user_encrypted_private_key,
-    get_user_private_key_salt,
     get_user_certificate,
-    update_user_certificate
 )
 
 from utils import (
@@ -42,7 +32,6 @@ from utils import (
     generate_jwt,
     verify_jwt,
     generate_salt,
-    derive_key_from_password
 )
 
 from user_keys import (
@@ -231,158 +220,6 @@ def login():
 
   except Exception as e:
     logger.error(f"Error en login: {str(e)}")
-    return jsonify({'error': 'Error interno del servidor'}), 500
-
-
-@app.route('/encrypt', methods=['POST'])
-def encrypt():
-    """
-    Cifra un mensaje usando AES-256-GCM con la clave del usuario autenticado.
-    
-    Headers:
-        Authorization: Bearer <token_jwt>
-    
-    Body JSON:
-        {
-            "plaintext": "texto a cifrar"
-        }
-    
-    Proceso:
-        1. Verifica el token JWT
-        2. Obtiene la clave de cifrado del usuario
-        3. Cifra el mensaje con AES-256-GCM
-        4. Genera nonce aleatorio y tag de autenticación
-    
-    Respuesta exitosa (200):
-        {
-            "success": true,
-            "ciphertext": "base64_del_texto_cifrado",
-            "nonce": "base64_del_nonce",
-            "tag": "base64_del_tag",
-            "algorithm": "AES-256-GCM",
-            "key_size": 256
-        }
-    
-    Errores:
-        - 400: Datos faltantes
-        - 401: Token inválido o ausente
-        - 500: Error interno del servidor
-    """
-    try:
-        # Verificar token JWT
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Token no proporcionado'}), 401
-        
-        token = auth_header.split(' ')[1]
-        payload = verify_jwt(token)
-        username = payload['username']
-        
-        # Obtener datos del request
-        data = request.get_json()
-        plaintext = data.get('plaintext')
-        
-        if not plaintext:
-            return jsonify({'error': 'Texto plano requerido'}), 400
-        
-        # Obtener clave de cifrado del usuario
-        encryption_key = get_user_encryption_key(username)
-        
-        if not encryption_key:
-            return jsonify({'error': 'Usuario no encontrado'}), 404
-        
-        # Cifrar con AES-256-GCM
-        encrypted_data = encrypt_aes_gcm(plaintext, encryption_key)
-        
-        return jsonify({
-            'success': True,
-            'ciphertext': encrypted_data['ciphertext'],
-            'nonce': encrypted_data['nonce'],
-            'tag': encrypted_data['tag'],
-            'algorithm': 'AES-256-GCM',
-            'key_size': 256
-        }), 200
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 401
-    except Exception as e:
-        logger.error(f"Error en cifrado: {str(e)}")
-        return jsonify({'error': 'Error interno del servidor'}), 500
-
-      
-@app.route('/decrypt', methods=['POST'])
-def decrypt():
-  """
-  Descifra un mensaje usando AES-256-GCM con la clave del usuario autenticado.
-
-  Headers:
-      Authorization: Bearer <token_jwt>
-
-  Body JSON:
-      {
-          "ciphertext": "base64_del_texto_cifrado",
-          "nonce": "base64_del_nonce",
-          "tag": "base64_del_tag"
-      }
-
-  Proceso:
-      1. Verifica el token JWT
-      2. Obtiene la clave de cifrado del usuario
-      3. Verifica el tag de autenticación (integridad)
-      4. Descifra el mensaje
-
-  Respuesta exitosa (200):
-      {
-          "success": true,
-          "plaintext": "texto descifrado"
-      }
-
-  Errores:
-      - 400: Datos faltantes
-      - 401: Token inválido o ausente
-      - 400: Tag inválido (mensaje corrupto o manipulado)
-      - 500: Error interno del servidor
-  """
-  try:
-    # Verificar token JWT
-    auth_header = request.headers.get('Authorization')
-    if not auth_header or not auth_header.startswith('Bearer '):
-      return jsonify({'error': 'Token no proporcionado'}), 401
-
-    token = auth_header.split(' ')[1]
-    payload = verify_jwt(token)
-    username = payload['username']
-
-    # Obtener datos del request
-    data = request.get_json()
-    ciphertext = data.get('ciphertext')
-    nonce = data.get('nonce')
-    tag = data.get('tag')
-
-    if not all([ciphertext, nonce, tag]):
-      return jsonify({
-          'error': 'ciphertext, nonce y tag son requeridos'
-      }), 400
-
-    # Obtener clave de cifrado del usuario
-    encryption_key = get_user_encryption_key(username)
-
-    if not encryption_key:
-      return jsonify({'error': 'Usuario no encontrado'}), 404
-
-    # Descifrar con AES-256-GCM (verifica tag automáticamente)
-    plaintext = decrypt_aes_gcm(ciphertext, nonce, tag, encryption_key)
-
-    return jsonify({
-        'success': True,
-        'plaintext': plaintext
-    }), 200
-
-  except ValueError as e:
-    # Puede ser token inválido o tag inválido (mensaje corrupto)
-    return jsonify({'error': str(e)}), 400
-  except Exception as e:
-    logger.error(f"Error en descifrado: {str(e)}")
     return jsonify({'error': 'Error interno del servidor'}), 500
 
 
@@ -868,134 +705,6 @@ def get_message_raw(message_id):
         return jsonify({'error': 'Error interno del servidor'}), 500
 
 
-
-@app.route('/hmac/generate', methods=['POST'])
-def hmac_generate():
-    """
-    Genera un HMAC de un mensaje (demostración educativa).
-    
-    Headers:
-        Authorization: Bearer <token_jwt>
-    
-    Body JSON:
-        {
-            "message": "texto a autenticar"
-        }
-    
-    Proceso:
-        1. Verifica el token JWT
-        2. Obtiene la clave HMAC del usuario
-        3. Genera HMAC-SHA256
-    
-    Respuesta exitosa (200):
-        {
-            "success": true,
-            "message": "texto original",
-            "hmac": "hex_string_del_hmac",
-            "algorithm": "HMAC-SHA256",
-            "key_size": 256
-        }
-    """
-    try:
-        # Verificar token JWT
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Token no proporcionado'}), 401
-        
-        token = auth_header.split(' ')[1]
-        payload = verify_jwt(token)
-        username = payload['username']
-        
-        # Obtener datos del request
-        data = request.get_json()
-        message = data.get('message')
-        
-        if not message:
-            return jsonify({'error': 'Mensaje requerido'}), 400
-        
-        # Obtener clave HMAC del usuario
-        hmac_key = get_user_hmac_key(username)
-        
-        # Generar HMAC
-        hmac_value = generate_hmac(message, hmac_key)
-        
-        logger.info(f"HMAC generado para usuario '{username}' (HMAC-SHA256, 256 bits)")
-        
-        return jsonify({
-            'success': True,
-            'message': message,
-            'hmac': hmac_value,
-            'algorithm': 'HMAC-SHA256',
-            'key_size': 256
-        }), 200
-        
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 401
-    except Exception as e:
-        logger.error(f"Error al generar HMAC: {str(e)}")
-        return jsonify({'error': 'Error interno del servidor'}), 500
-
-
-@app.route('/hmac/verify', methods=['POST'])
-def hmac_verify():
-    """
-    Verifica un HMAC (demostración educativa).
-
-    Headers:
-        Authorization: Bearer <token_jwt>
-
-    Body JSON:
-        {
-            "message": "texto original",
-            "hmac": "hex_string_del_hmac_a_verificar"
-        }
-
-    Respuesta exitosa (200):
-        {
-            "success": true,
-            "valid": true/false,
-            "message": "HMAC válido" o "HMAC inválido"
-        }
-    """
-    try:
-        # Verificar token JWT
-        auth_header = request.headers.get('Authorization')
-        if not auth_header or not auth_header.startswith('Bearer '):
-            return jsonify({'error': 'Token no proporcionado'}), 401
-
-        token = auth_header.split(' ')[1]
-        payload = verify_jwt(token)
-        username = payload['username']
-
-        # Obtener datos del request
-        data = request.get_json()
-        message = data.get('message')
-        hmac_to_verify = data.get('hmac')
-
-        if not message or not hmac_to_verify:
-            return jsonify({'error': 'Mensaje y HMAC requeridos'}), 400
-
-        # Obtener clave HMAC del usuario
-        hmac_key = get_user_hmac_key(username)
-
-        # Verificar HMAC
-        is_valid = verify_hmac(message, hmac_to_verify, hmac_key)
-
-        logger.info(f"HMAC verificado para usuario '{username}': {'válido' if is_valid else 'inválido'}")
-
-        return jsonify({
-            'success': True,
-            'valid': is_valid,
-            'message': 'HMAC válido' if is_valid else 'HMAC inválido'
-        }), 200
-
-    except ValueError as e:
-        return jsonify({'error': str(e)}), 401
-    except Exception as e:
-        logger.error(f"Error al verificar HMAC: {str(e)}")
-        return jsonify({'error': 'Error interno del servidor'}), 500
-
-
 @app.route('/reset_db', methods=['POST'])
 def reset_db():
     """
@@ -1023,125 +732,6 @@ def reset_db():
         logger.error(f"Error al resetear base de datos: {str(e)}")
         return jsonify({'error': 'Error interno del servidor'}), 500
 
-
-@app.route('/pki/verify-signature', methods=['POST'])
-def pki_verify_signature():
-    """
-    Verifica una firma digital usando la clave pública de un certificado.
-    
-    Body JSON:
-        {
-            "certificate_pem": "base64_del_certificado_pem",
-            "signature": "base64_de_la_firma",
-            "data": "datos_originales"
-        }
-    
-    Respuesta exitosa (200):
-        {
-            "success": true,
-            "valid": true/false,
-            "message": "Firma válida" o "Firma inválida"
-        }
-    
-    Errores:
-        - 400: Datos faltantes o inválidos
-        - 500: Error interno del servidor
-    """
-    try:
-        data = request.get_json()
-        cert_pem_b64 = data.get('certificate_pem')
-        signature_b64 = data.get('signature')
-        message_data = data.get('data')
-        
-        if not all([cert_pem_b64, signature_b64, message_data]):
-            return jsonify({'error': 'certificate_pem, signature y data son requeridos'}), 400
-        
-        # Decodificar base64
-        cert_pem = base64.b64decode(cert_pem_b64)
-        signature = base64.b64decode(signature_b64)
-        data_bytes = message_data.encode('utf-8')
-        
-        # Cargar certificado y extraer clave pública
-        cert = x509.load_pem_x509_certificate(cert_pem)
-        public_key = cert.public_key()
-        
-        # Verificar firma
-        is_valid = verify_signature(public_key, signature, data_bytes)
-        
-        logger.info(f"Verificación de firma: {'válida' if is_valid else 'inválida'}")
-        
-        return jsonify({
-            'success': True,
-            'valid': is_valid,
-            'message': 'Firma válida' if is_valid else 'Firma inválida'
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error al verificar firma: {str(e)}")
-        return jsonify({'error': f'Error al verificar firma: {str(e)}'}), 500
-
-
-@app.route('/pki/verify-chain', methods=['POST'])
-def pki_verify_chain():
-    """
-    Verifica la cadena completa de certificados y CRL.
-    
-    Body JSON:
-        {
-            "user_cert_pem": "base64_del_certificado_usuario",
-            "intermediate_cert_pem": "base64_del_certificado_intermedio",
-            "root_cert_pem": "base64_del_certificado_raiz",
-            "crl_pem": "base64_de_la_crl"
-        }
-    
-    Respuesta exitosa (200):
-        {
-            "success": true,
-            "valid": true/false,
-            "message": "Cadena válida" o "Cadena inválida"
-        }
-    
-    Errores:
-        - 400: Datos faltantes o inválidos
-        - 500: Error interno del servidor
-    """
-    try:
-        data = request.get_json()
-        user_cert_b64 = data.get('user_cert_pem')
-        inter_cert_b64 = data.get('intermediate_cert_pem')
-        root_cert_b64 = data.get('root_cert_pem')
-        crl_b64 = data.get('crl_pem')
-        
-        if not all([user_cert_b64, inter_cert_b64, root_cert_b64, crl_b64]):
-            return jsonify({
-                'error': 'user_cert_pem, intermediate_cert_pem, root_cert_pem y crl_pem son requeridos'
-            }), 400
-        
-        # Decodificar base64
-        user_cert_pem = base64.b64decode(user_cert_b64)
-        inter_cert_pem = base64.b64decode(inter_cert_b64)
-        root_cert_pem = base64.b64decode(root_cert_b64)
-        crl_pem = base64.b64decode(crl_b64)
-        
-        # Verificar cadena
-        is_valid = verify_certificate_chain(
-            user_cert_pem,
-            inter_cert_pem,
-            root_cert_pem,
-            crl_pem
-        )
-        
-        logger.info(f"Verificación de cadena: {'válida' if is_valid else 'inválida'}")
-        
-        return jsonify({
-            'success': True,
-            'valid': is_valid,
-            'message': 'Cadena válida' if is_valid else 'Cadena inválida'
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"Error al verificar cadena: {str(e)}")
-        return jsonify({'error': f'Error al verificar cadena: {str(e)}'}), 500
 
 
 @app.route('/cert/issue', methods=['POST'])
@@ -1327,7 +917,7 @@ def cert_get_crl():
     Devuelve la CRL (Certificate Revocation List) actual.
     
     Proceso:
-        1. Lee el archivo intermediate_ca.crl del disco
+        1. Lee el archivo CRL oficial generado por OpenSSL en pki/intermediate/crl.pem
         2. Codifica el contenido en base64
         3. Devuelve la CRL
     
@@ -1343,7 +933,7 @@ def cert_get_crl():
         - 500: Error interno del servidor
     """
     try:
-        crl_path = "intermediate_ca.crl"
+        crl_path = "pki/intermediate/crl.pem"
         
         # Verificar que existe el archivo CRL
         if not os.path.exists(crl_path):

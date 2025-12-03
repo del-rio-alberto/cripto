@@ -20,3 +20,5 @@ pki/intermediate/certs/
 *.log
 issued_certs.log
 server.log
+pki/intermediate/*
+pki/root/*
