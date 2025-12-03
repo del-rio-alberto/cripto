@@ -13,6 +13,7 @@ pki/root/private/
 *.p12
 *.der
 *.srl
+*.pub
 certs/
 pki/root/certs/
 pki/intermediate/certs/
