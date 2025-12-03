@@ -17,6 +17,7 @@ class SMSecShell(cmd.Cmd):
         self.base_url = 'http://localhost:5000'
         self.token = None
         self.username = None
+        self.private_key_cache = {}
         self.keys_dir = 'keys'
         if not os.path.exists(self.keys_dir):
             os.makedirs(self.keys_dir)
@@ -39,6 +40,26 @@ class SMSecShell(cmd.Cmd):
             print(f"{prompt} [Using env var]")
             return env_pass
         return getpass.getpass(prompt)
+
+    def _load_private_key(self, username, password=None, prompt_message=None):
+        """Returns cached private key or decrypts it from disk."""
+        if username in self.private_key_cache:
+            return self.private_key_cache[username]
+
+        key_path = self._get_private_key_path(username)
+        if not os.path.exists(key_path):
+            raise FileNotFoundError(f"No se encontró clave privada para '{username}'.")
+
+        if password is None:
+            prompt = prompt_message or f"Introduce contraseña para descifrar la clave de {username}: "
+            password = self._get_password(prompt)
+
+        with open(key_path, 'r') as f:
+            encrypted_key = f.read()
+
+        private_key = decrypt_private_key(encrypted_key, password)
+        self.private_key_cache[username] = private_key
+        return private_key
 
     def do_genkey(self, arg):
         """Genera un par de claves EC P-256 localmente: genkey <username>"""
@@ -83,16 +104,9 @@ class SMSecShell(cmd.Cmd):
         if not os.path.exists(key_path):
             print(f"No se encontró clave privada para '{username}'. Ejecuta 'genkey {username}' primero.")
             return
-            
-        password = self._get_password(f"Introduce contraseña para descifrar la clave de {username}: ")
         
         try:
-            # Leer clave cifrada
-            with open(key_path, 'r') as f:
-                encrypted_key = f.read()
-                
-            # Descifrar clave
-            private_key = decrypt_private_key(encrypted_key, password)
+            private_key = self._load_private_key(username, prompt_message=f"Introduce contraseña para descifrar la clave de {username}: ")
             
             # Generar CSR
             csr_pem = generate_csr(private_key, username)
@@ -205,6 +219,13 @@ class SMSecShell(cmd.Cmd):
                 self.username = data['username']
                 print(f"Login exitoso como '{self.username}'.")
                 self.prompt = f'({self.username}) '
+                try:
+                    private_key = self._load_private_key(self.username, prompt_message=f"Introduce contraseña para descifrar la clave local de {self.username}: ")
+                    print("Clave privada descifrada y cargada en memoria.")
+                except FileNotFoundError:
+                    print(f"Advertencia: no se encontró una clave privada local para '{self.username}'. Ejecuta 'genkey {self.username}' si es necesario.")
+                except Exception as e:
+                    print(f"Advertencia: no se pudo descifrar la clave privada local: {e}")
             else:
                 print(f"Error: {response.json().get('error', 'Error desconocido')}")
         except requests.exceptions.RequestException as e:
@@ -230,13 +251,9 @@ class SMSecShell(cmd.Cmd):
         if not os.path.exists(sender_key_path):
             print(f"No se encontró clave privada para '{sender_user}'.")
             return
-            
-        password = self._get_password(f"Introduce contraseña de {sender_user}: ")
         
         try:
-            with open(sender_key_path, 'r') as f:
-                encrypted_key = f.read()
-            sender_private_key = decrypt_private_key(encrypted_key, password)
+            sender_private_key = self._load_private_key(sender_user, prompt_message=f"Introduce contraseña de {sender_user}: ")
         except Exception as e:
             print(f"Error al descifrar clave privada: {e}")
             return
@@ -376,13 +393,9 @@ class SMSecShell(cmd.Cmd):
             if not os.path.exists(key_path):
                 print(f"No se encontró clave privada local para '{self.username}'.")
                 return
-                
-            password = self._get_password(f"Introduce contraseña para descifrar mensaje (usuario {self.username}): ")
             
             try:
-                with open(key_path, 'r') as f:
-                    encrypted_key = f.read()
-                private_key = decrypt_private_key(encrypted_key, password)
+                private_key = self._load_private_key(self.username, prompt_message=f"Introduce contraseña para descifrar mensaje (usuario {self.username}): ")
             except Exception as e:
                 print(f"Contraseña incorrecta o error de clave: {e}")
                 return
@@ -503,6 +516,7 @@ class SMSecShell(cmd.Cmd):
                 self.token = data['token']
                 self.username = data['username']
                 self.prompt = f'({self.username}) '
+                self.private_key_cache[self.username] = private_key
                 print(f"Sesión iniciada")
             else:
                 print(f"Error: {response.json().get('error')}")
@@ -521,6 +535,7 @@ class SMSecShell(cmd.Cmd):
                 self.token = None
                 self.username = None
                 self.prompt = '(smsec) '
+                self.private_key_cache.clear()
             else:
                 print(f"Error: {response.json().get('error', 'Error desconocido')}")
         except requests.exceptions.RequestException as e:
@@ -528,6 +543,7 @@ class SMSecShell(cmd.Cmd):
 
     def do_exit(self, arg):
         """Salir del programa"""
+        self.private_key_cache.clear()
         print('Sesión cerrada.')
         return True
 
