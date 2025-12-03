@@ -232,7 +232,7 @@ class SMSecShell(cmd.Cmd):
             print(f"Error de conexión: {e}")
 
     def do_send(self, arg):
-        """Envía un mensaje seguro: send <emisor> <destinatario> <mensaje>"""
+        """Envía un mensaje seguro: send [emisor] <destinatario> <mensaje>"""
         # Parsear argumentos respetando comillas
         try:
             args = shlex.split(arg)
@@ -240,11 +240,20 @@ class SMSecShell(cmd.Cmd):
             print("Error al parsear argumentos. Asegúrate de cerrar las comillas.")
             return
 
-        if len(args) != 3:
-            print("Uso: send <emisor> <destinatario> <mensaje>")
+        if len(args) == 2:
+            # Si solo hay 2 argumentos, usar el usuario logueado como emisor
+            if not self.username:
+                print("Debes iniciar sesión primero (login <user> <pass>).")
+                return
+            sender_user = self.username
+            receiver_user, message = args
+        elif len(args) == 3:
+            # Si hay 3 argumentos, usar el primero como emisor
+            sender_user, receiver_user, message = args
+        else:
+            print("Uso: send [emisor] <destinatario> <mensaje>")
+            print("     (si no se especifica emisor, se usa el usuario logueado)")
             return
-        
-        sender_user, receiver_user, message = args
         
         # 1. Cargar clave privada del emisor
         sender_key_path = self._get_private_key_path(sender_user)
@@ -302,10 +311,7 @@ class SMSecShell(cmd.Cmd):
             secure_payload = send_secure_message(sender_data, receiver_data, message)
             
             # 5. Enviar al servidor
-            # Necesitamos estar logueados como el emisor para enviar (o al menos tener un token válido)
-            # Por simplicidad, asumimos que el usuario ya hizo login o hacemos login automático si tenemos credenciales (no las tenemos aquí)
-            # Requerimos que el usuario haga login primero con 'login <user> <pass>'
-            
+            # Necesitamos estar logueados para enviar
             if not self.token:
                 print("Debes iniciar sesión primero (login <user> <pass>).")
                 return

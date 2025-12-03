@@ -30,7 +30,7 @@ Comandos disponibles:
 - `getcert <usuario>` - Obtiene certificado del servidor
 - `register <usuario>` - Registra usuario en el servidor
 - `login <usuario> <password>` - Inicia sesión
-- `send <emisor> <destinatario> <mensaje>` - Envía mensaje seguro
+- `send <destinatario> <mensaje>` - Envía mensaje seguro
 - `inbox` - Lista mensajes recibidos
 - `read <id>` - Lee y descifra un mensaje
 - `reset` - Resetea la base de datos
@@ -48,7 +48,7 @@ setup pepe
 setup pedro 
 
 // terminal 1
-send pepe pedro "Hola pedro"
+send pedro "Hola pedro"
 
 // terminal 2
 inbox
