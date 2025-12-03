@@ -8,8 +8,145 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
+import shutil
 
 
+def setup_pki():
+    """
+    Inicializa la PKI ejecutando los scripts OpenSSL necesarios.
+    Crea los archivos necesarios para que los tests funcionen.
+    """
+    # Obtener el directorio base del proyecto (donde están los scripts)
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Copiar archivos de configuración al directorio de trabajo actual
+    # necesario para que los tests funcionen en directorios temporales
+    os.makedirs("pki", exist_ok=True)
+    config_files = ["ca-root.cnf", "ca-intermediate.cnf"]
+    for config_file in config_files:
+        src = os.path.join(script_dir, "pki", config_file)
+        dst = os.path.join("pki", config_file)
+        if os.path.exists(src) and not os.path.exists(dst):
+            shutil.copy(src, dst)
+    
+    # Ejecutar create_root_ca.sh
+    root_script = os.path.join(script_dir, "create_root_ca.sh")
+    if os.path.exists(root_script):
+        result = subprocess.run(
+            ["bash", root_script],
+            cwd=os.getcwd(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Error ejecutando create_root_ca.sh: {result.stderr.decode()}")
+    else:
+        # Si no existe el script, crear la estructura mínima manualmente
+        os.makedirs("pki/root/private", exist_ok=True)
+        os.makedirs("pki/root/certs", exist_ok=True)
+        os.makedirs("pki/root/newcerts", exist_ok=True)
+        if not os.path.exists("pki/root/index.txt"):
+            open("pki/root/index.txt", "w").close()
+        if not os.path.exists("pki/root/serial"):
+            with open("pki/root/serial", "w") as f:
+                f.write("1000")
+        
+        # Generar Root CA
+        subprocess.run(
+            ["openssl", "genrsa", "-out", "pki/root/private/root.key.pem", "4096"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        config_path = os.path.join(script_dir, "pki", "ca-root.cnf")
+        subprocess.run(
+            ["openssl", "req", "-config", config_path,
+             "-key", "pki/root/private/root.key.pem",
+             "-new", "-x509", "-days", "3650", "-sha256", "-extensions", "v3_ca",
+             "-batch", "-out", "pki/root/certs/root.cert.pem"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+    
+    # Ejecutar create_intermediate_ca.sh
+    inter_script = os.path.join(script_dir, "create_intermediate_ca.sh")
+    if os.path.exists(inter_script):
+        result = subprocess.run(
+            ["bash", inter_script],
+            cwd=os.getcwd(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Error ejecutando create_intermediate_ca.sh: {result.stderr.decode()}")
+    else:
+        # Si no existe el script, crear la estructura mínima manualmente
+        os.makedirs("pki/intermediate/private", exist_ok=True)
+        os.makedirs("pki/intermediate/certs", exist_ok=True)
+        os.makedirs("pki/intermediate/newcerts", exist_ok=True)
+        os.makedirs("pki/intermediate/crl", exist_ok=True)
+        if not os.path.exists("pki/intermediate/index.txt"):
+            open("pki/intermediate/index.txt", "w").close()
+        if not os.path.exists("pki/intermediate/serial"):
+            with open("pki/intermediate/serial", "w") as f:
+                f.write("1000")
+        if not os.path.exists("pki/intermediate/crlnumber"):
+            with open("pki/intermediate/crlnumber", "w") as f:
+                f.write("1000")
+        
+        # Generar Intermediate CA
+        subprocess.run(
+            ["openssl", "genrsa", "-out", "pki/intermediate/intermediate.key", "4096"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        inter_config_path = os.path.join(script_dir, "pki", "ca-intermediate.cnf")
+        root_config_path = os.path.join(script_dir, "pki", "ca-root.cnf")
+        
+        # Generar CSR
+        subprocess.run(
+            ["openssl", "req", "-config", inter_config_path, "-new", "-sha256", "-batch",
+             "-key", "pki/intermediate/intermediate.key",
+             "-out", "pki/intermediate/intermediate.csr"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Firmar con Root CA
+        subprocess.run(
+            ["openssl", "ca", "-config", root_config_path, "-extensions", "v3_intermediate_ca",
+             "-days", "1825", "-notext", "-md", "sha256",
+             "-in", "pki/intermediate/intermediate.csr",
+             "-out", "pki/intermediate/intermediate.crt",
+             "-batch"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+        
+        # Generar CRL inicial
+        subprocess.run(
+            ["openssl", "ca", "-config", inter_config_path, "-gencrl",
+             "-out", "pki/intermediate/crl.pem"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+    
+    # Copiar archivos a los nombres que esperan los tests (si existen)
+    if os.path.exists("pki/root/certs/root.cert.pem"):
+        shutil.copy("pki/root/certs/root.cert.pem", "root_ca.crt")
+    if os.path.exists("pki/intermediate/intermediate.crt"):
+        shutil.copy("pki/intermediate/intermediate.crt", "intermediate_ca.crt")
+    if os.path.exists("pki/intermediate/intermediate.key"):
+        shutil.copy("pki/intermediate/intermediate.key", "intermediate_ca.key")
+    if os.path.exists("pki/intermediate/crl.pem"):
+        shutil.copy("pki/intermediate/crl.pem", "intermediate_ca.crl")
 
 
 def load_certificate(filename):
@@ -144,7 +281,9 @@ def revoke_certificate(serial):
                 continue
 
     if cert_path is None:
-        raise ValueError(f"No se encontró ningún certificado en 'certs/' con el número de serie {serial}")
+        # Certificado no encontrado, retornar False en lugar de lanzar excepción
+        print(f"Advertencia: No se encontró ningún certificado con el número de serie {serial}")
+        return False
 
     # 1) Revocar en la base de datos OpenSSL
     cmd_revoke = [
